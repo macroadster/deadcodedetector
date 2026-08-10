@@ -105,6 +105,46 @@ func (r *Resolver) resolveRelative(fromAbs string, module string, level int) str
 	return r.tryPath(full)
 }
 
+// ResolveSubmodule maps `from module import name` to a local submodule file.
+// `from pkg import util` → pkg/util.py; `from . import util` → <pkg>/util.py.
+func (r *Resolver) ResolveSubmodule(fromAbs, module string, level int, name string) string {
+	if name == "" || name == "*" {
+		return ""
+	}
+	if module == "" {
+		return r.Resolve(fromAbs, name, level)
+	}
+	return r.Resolve(fromAbs, module+"."+name, level)
+}
+
+// ParentInits returns ancestor __init__.py files of a resolved module.
+// Importing pkg.sub always executes pkg/__init__.py in CPython.
+func (r *Resolver) ParentInits(abs string) []string {
+	if abs == "" {
+		return nil
+	}
+	rel, err := filepath.Rel(r.root, abs)
+	if err != nil {
+		return nil
+	}
+	dir := filepath.ToSlash(filepath.Dir(rel))
+	var out []string
+	for dir != "" && dir != "." {
+		if init, ok := r.files[dir+"/__init__.py"]; ok && init != abs {
+			out = append(out, init)
+		}
+		parent := filepath.ToSlash(filepath.Dir(dir))
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	if init, ok := r.files["__init__.py"]; ok && init != abs {
+		out = append(out, init)
+	}
+	return out
+}
+
 func (r *Resolver) resolveSameDir(fromAbs, module string) string {
 	rel, err := filepath.Rel(r.root, fromAbs)
 	if err != nil {

@@ -165,7 +165,7 @@ func starlightRoot(t *testing.T) string {
 	// internal/python -> repo root -> testdata/starlight
 	root := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", "testdata", "starlight"))
 	if st, err := os.Stat(root); err != nil || !st.IsDir() {
-		t.Fatalf("starlight testdata missing: %s", root)
+		t.Skipf("starlight testdata missing: %s", root)
 	}
 	return root
 }

@@ -56,11 +56,17 @@ func Detect(root string, files []walk.File, entries []string) ([]finding.Finding
 		for i := range m.Imports {
 			imp := &m.Imports[i]
 			imp.resolved = res.Resolve(m.File.Abs, imp.Module, imp.Level)
+			if imp.From && !imp.Star && imp.Name != "" {
+				imp.resolvedSub = res.ResolveSubmodule(m.File.Abs, imp.Module, imp.Level, imp.Name)
+				if imp.resolvedSub == imp.resolved {
+					imp.resolvedSub = ""
+				}
+			}
 		}
 	}
 
 	entrySet := discoverEntries(root, byAbs, entries)
-	liveFiles, usedExports := markLive(byAbs, entrySet)
+	liveFiles, usedExports := markLive(byAbs, entrySet, res)
 
 	var fs []finding.Finding
 	// Unused files — only when we have real entries.
@@ -110,18 +116,12 @@ type module struct {
 }
 
 func isEffectivelyEmpty(m *module) bool {
-	if len(m.Decls) > 0 {
-		return false
-	}
-	// Only imports / docstring / __all__ style noise
 	for _, d := range m.Decls {
 		if !isDunder(d.Name) {
 			return false
 		}
 	}
-	// If it only re-exports via imports, it is meaningful — keep as live noise.
-	// Empty means no decls and maybe only imports: still a package surface.
-	// Treat as empty only when no imports either.
+	// Package marker or dunder-only noise. Re-export surfaces have imports.
 	return len(m.Imports) == 0
 }
 
@@ -157,7 +157,7 @@ func discoverEntries(root string, byAbs map[string]*module, extra []string) map[
 	return out
 }
 
-func markLive(byAbs map[string]*module, entries map[string]bool) (live map[string]bool, usedExports map[string]map[string]bool) {
+func markLive(byAbs map[string]*module, entries map[string]bool, res *Resolver) (live map[string]bool, usedExports map[string]map[string]bool) {
 	live = map[string]bool{}
 	usedExports = map[string]map[string]bool{}
 	var queue []string
@@ -168,6 +168,21 @@ func markLive(byAbs map[string]*module, entries map[string]bool) (live map[strin
 		for abs := range byAbs {
 			live[abs] = true
 		}
+	}
+
+	enqueue := func(abs string) {
+		if abs == "" || live[abs] {
+			return
+		}
+		queue = append(queue, abs)
+	}
+	ensureUE := func(abs string) map[string]bool {
+		ue := usedExports[abs]
+		if ue == nil {
+			ue = map[string]bool{}
+			usedExports[abs] = ue
+		}
+		return ue
 	}
 
 	for len(queue) > 0 {
@@ -181,33 +196,49 @@ func markLive(byAbs map[string]*module, entries map[string]bool) (live map[strin
 		if !ok {
 			continue
 		}
-		if usedExports[abs] == nil {
-			usedExports[abs] = map[string]bool{}
-		}
+		ensureUE(abs)
 		for _, imp := range m.Imports {
-			if imp.resolved == "" {
+			targets := make([]string, 0, 4)
+			if imp.resolved != "" {
+				targets = append(targets, imp.resolved)
+			}
+			if imp.resolvedSub != "" {
+				targets = append(targets, imp.resolvedSub)
+			}
+			if res != nil {
+				for _, t := range targets {
+					for _, parent := range res.ParentInits(t) {
+						enqueue(parent)
+					}
+				}
+			}
+			for _, t := range targets {
+				enqueue(t)
+			}
+			if imp.resolved == "" && imp.resolvedSub == "" {
 				continue
 			}
-			if !live[imp.resolved] {
-				queue = append(queue, imp.resolved)
-			}
-			ue := usedExports[imp.resolved]
-			if ue == nil {
-				ue = map[string]bool{}
-				usedExports[imp.resolved] = ue
-			}
 			if imp.Star {
-				ue["*"] = true
+				if imp.resolved != "" {
+					ensureUE(imp.resolved)["*"] = true
+				}
+				if imp.resolvedSub != "" {
+					ensureUE(imp.resolvedSub)["*"] = true
+				}
 				continue
 			}
 			if imp.From {
-				if imp.Name != "" {
-					ue[imp.Name] = true
+				if imp.resolved != "" && imp.Name != "" {
+					ensureUE(imp.resolved)[imp.Name] = true
 				}
-			} else {
-				// import mod — whole module object; attribute uses on local name
-				// mark specific members if we can see them.
-				markModuleAttrUses(m, imp, ue)
+				if imp.resolvedSub != "" {
+					// from pkg import util; util.helper() — helper is an export of util.
+					markModuleAttrUses(m, Import{Local: imp.Local, Module: imp.Local}, ensureUE(imp.resolvedSub))
+				}
+				continue
+			}
+			if imp.resolved != "" {
+				markModuleAttrUses(m, imp, ensureUE(imp.resolved))
 			}
 		}
 	}
@@ -215,41 +246,70 @@ func markLive(byAbs map[string]*module, entries map[string]bool) (live map[strin
 }
 
 func markModuleAttrUses(m *module, imp Import, ue map[string]bool) {
-	// import scripts.starlight_utils as u  → local is first component or alias
+	// import scripts.starlight_utils as u  → local is alias
+	// import pkg.util                     → local is first component
 	local := imp.Local
 	if local == "" {
 		ue["*"] = true
 		return
 	}
-	attrs := m.AttrUses[local]
-	if len(attrs) == 0 {
-		// Module imported but never used as attribute — may still be side-effect
-		// or re-exported. Mark nothing as used for export purposes; unused import
-		// is reported separately. Exception: `import pkg` then only referenced
-		// as name is a module use, not symbol use.
-		return
-	}
-	any := false
-	for attr := range attrs {
-		ue[attr] = true
-		any = true
-	}
-	// Also check Uses with Member
+	modParts := strings.Split(imp.Module, ".")
+	aliased := imp.Module == "" || local != modParts[0]
+	dotted := !aliased && len(modParts) > 1
+
 	for _, u := range m.Uses {
-		if u.Name == local && u.Member != "" {
-			ue[u.Member] = true
-			any = true
+		if u.Name != local {
+			continue
 		}
-	}
-	if !any {
-		// namespace imported and referenced without attr → all exports may be used
-		for _, u := range m.Uses {
-			if u.Name == local && u.Member == "" {
+		chain := useChain(u)
+		if dotted {
+			remainder := modParts[1:]
+			if len(chain) == 0 {
+				// `import pkg.util` then only `pkg` is referenced — cannot see
+				// which member of util is used. Prefer FN.
 				ue["*"] = true
 				return
 			}
+			if !hasStringPrefix(chain, remainder) {
+				continue
+			}
+			extra := chain[len(remainder):]
+			if len(extra) == 0 {
+				ue["*"] = true
+				return
+			}
+			ue[extra[0]] = true
+			continue
+		}
+		if len(chain) == 0 {
+			// Passed around as a value: all exports may be used.
+			ue["*"] = true
+			return
+		}
+		ue[chain[0]] = true
+	}
+}
+
+func useChain(u Use) []string {
+	if len(u.Chain) > 0 {
+		return u.Chain
+	}
+	if u.Member != "" {
+		return []string{u.Member}
+	}
+	return nil
+}
+
+func hasStringPrefix(chain, prefix []string) bool {
+	if len(chain) < len(prefix) {
+		return false
+	}
+	for i, p := range prefix {
+		if chain[i] != p {
+			return false
 		}
 	}
+	return true
 }
 
 func unusedExports(m *module, used map[string]bool, isEntry bool) []finding.Finding {
@@ -282,7 +342,7 @@ func unusedExports(m *module, used map[string]bool, isEntry bool) []finding.Find
 	var fs []finding.Finding
 	seen := map[string]bool{}
 	for _, d := range m.Decls {
-		if d.Ignored || isDunder(d.Name) {
+		if d.Ignored || d.Decorated || isDunder(d.Name) {
 			continue
 		}
 		if seen[d.Name] {
@@ -385,7 +445,7 @@ func unusedImportsAndLocals(m *module, usedExports map[string]bool, isEntry bool
 	seen := map[string]bool{}
 	isTest := isTestFile(m.File.Rel)
 	for _, d := range m.Decls {
-		if d.Ignored || isDunder(d.Name) {
+		if d.Ignored || d.Decorated || isDunder(d.Name) {
 			continue
 		}
 		if seen[d.Name] {
@@ -411,8 +471,13 @@ func unusedImportsAndLocals(m *module, usedExports map[string]bool, isEntry bool
 			continue
 		}
 		priv := strings.HasPrefix(d.Name, "_")
+		base := filepath.Base(m.File.Rel)
 		if !priv {
-			if isEntry || m.HasMain || isTest || isEntryName(filepath.Base(m.File.Rel)) {
+			// conftest hooks / fixtures are pytest discovery, not call-graph uses.
+			if base == "conftest.py" {
+				continue
+			}
+			if isEntry || m.HasMain || isTest || isEntryName(base) {
 				// public unused in entry/test files
 			} else {
 				// library module: unusedExports handles public

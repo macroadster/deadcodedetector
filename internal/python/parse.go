@@ -33,10 +33,12 @@ type Import struct {
 	// Star is true for "from x import *".
 	Star bool
 	// From is true for from-import.
-	From bool
+	From      bool
 	Line, Col int
 	// resolved is the absolute path of Module, if local.
 	resolved string
+	// resolvedSub is a local submodule when `from pkg import name` names a module.
+	resolvedSub string
 }
 
 // Decl is a top-level binding (function, class, or assignment).
@@ -45,6 +47,9 @@ type Decl struct {
 	Line, Col int
 	Kind      string // function, class, var
 	Ignored   bool
+	// Decorated is true when the binding has a leading @decorator.
+	// Prefer FN: decorators often register the name dynamically.
+	Decorated bool
 }
 
 // Use is a name reference.
@@ -53,6 +58,8 @@ type Use struct {
 	Line, Col int
 	// Member is set for base.member attribute access (Name is the base).
 	Member string
+	// Chain is the full attribute path after Name (Member == Chain[0] when set).
+	Chain []string
 }
 
 func extract(src []byte) Extracted {
@@ -228,13 +235,14 @@ func (p *parser) parseDecoratorBlock(ex *Extracted) {
 	if p.acceptIdent("async") {
 		// async def
 	}
+	n := len(ex.Decls)
 	if p.peek().kind == tIdent && p.peek().lit == "def" {
 		p.parseDef(ex, false)
-		return
-	}
-	if p.peek().kind == tIdent && p.peek().lit == "class" {
+	} else if p.peek().kind == tIdent && p.peek().lit == "class" {
 		p.parseClass(ex)
-		return
+	}
+	for i := n; i < len(ex.Decls); i++ {
+		ex.Decls[i].Decorated = true
 	}
 }
 
@@ -469,7 +477,9 @@ func (p *parser) parseFromImport(ex *Extracted) {
 	}
 	// also handle `from ..` where dots may be a single "..." token? we use single dots
 	mod := ""
-	if p.peek().kind == tIdent {
+	// `import` is tokenized as an ident; do not swallow it as a module name
+	// (`from . import util`).
+	if p.peek().kind == tIdent && p.peek().lit != "import" {
 		if name, ok := p.parseDottedName(); ok {
 			mod = name
 		}
@@ -609,25 +619,15 @@ func (p *parser) parseExprish(ex *Extracted, depth int) {
 			base := p.next()
 			// Attribute chain: base.attr.attr2
 			if p.peek().kind == tPunct && p.peek().lit == "." {
-				first := true
+				var chain []string
 				for p.peek().kind == tPunct && p.peek().lit == "." {
 					p.next()
 					if p.peek().kind != tIdent {
 						break
 					}
-					mem := p.next()
-					if first {
-						p.recordUse(ex, base, mem.lit)
-						first = false
-					} else {
-						// deeper attrs: still record attr name as free word? skip base
-						// Record as attr on original base only for first hop.
-					}
-					// Also record the member as a free use so method-style
-					// references via self.foo still count for nested... no,
-					// self.foo shouldn't mark module-level foo. Skip.
-					_ = mem
+					chain = append(chain, p.next().lit)
 				}
+				p.recordUseChain(ex, base, chain)
 				continue
 			}
 			p.recordUse(ex, base, "")
@@ -681,8 +681,8 @@ func (p *parser) recordFStringExpr(ex *Extracted, expr string, line, col int) {
 			if isKeyword(name) {
 				continue
 			}
-			// attribute chain name.attr
-			member := ""
+			// attribute chain name.attr.attr2
+			var chain []string
 			for i < len(b) && b[i] == '.' {
 				i++
 				k := i
@@ -692,18 +692,10 @@ func (p *parser) recordFStringExpr(ex *Extracted, expr string, line, col int) {
 				if k == i {
 					break
 				}
-				if member == "" {
-					member = string(b[i:k])
-				}
+				chain = append(chain, string(b[i:k]))
 				i = k
 			}
-			ex.Uses = append(ex.Uses, Use{Name: name, Line: line, Col: col, Member: member})
-			if member != "" {
-				if ex.AttrUses[name] == nil {
-					ex.AttrUses[name] = map[string]bool{}
-				}
-				ex.AttrUses[name][member] = true
-			}
+			p.recordUseChainAt(ex, name, line, col, chain)
 			continue
 		}
 		i++
@@ -735,14 +727,33 @@ func (p *parser) looksLikeFromImport() bool {
 }
 
 func (p *parser) recordUse(ex *Extracted, base token, member string) {
+	var chain []string
+	if member != "" {
+		chain = []string{member}
+	}
+	p.recordUseChain(ex, base, chain)
+}
+
+func (p *parser) recordUseChain(ex *Extracted, base token, chain []string) {
 	if base.kind != tIdent || isKeyword(base.lit) {
 		return
 	}
-	ex.Uses = append(ex.Uses, Use{Name: base.lit, Line: base.line, Col: base.col, Member: member})
+	p.recordUseChainAt(ex, base.lit, base.line, base.col, chain)
+}
+
+func (p *parser) recordUseChainAt(ex *Extracted, name string, line, col int, chain []string) {
+	if name == "" || isKeyword(name) {
+		return
+	}
+	member := ""
+	if len(chain) > 0 {
+		member = chain[0]
+	}
+	ex.Uses = append(ex.Uses, Use{Name: name, Line: line, Col: col, Member: member, Chain: chain})
 	if member != "" {
-		if ex.AttrUses[base.lit] == nil {
-			ex.AttrUses[base.lit] = map[string]bool{}
+		if ex.AttrUses[name] == nil {
+			ex.AttrUses[name] = map[string]bool{}
 		}
-		ex.AttrUses[base.lit][member] = true
+		ex.AttrUses[name][member] = true
 	}
 }
