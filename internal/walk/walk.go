@@ -20,7 +20,7 @@ const MaxSourceBytes = 2 << 20 // 2 MiB
 type File struct {
 	Abs  string
 	Rel  string // slash-separated, relative to root
-	Lang string // "go", "js", "css", "html"
+	Lang string // "go", "js", "css", "html", "py"
 }
 
 // Discover walks root and returns files that look like source, applying m.
@@ -138,6 +138,8 @@ func langOf(name string) string {
 		return "html"
 	case ".tmpl", ".gohtml", ".gotmpl":
 		return "html"
+	case ".py", ".pyi":
+		return "py"
 	default:
 		return ""
 	}
@@ -148,7 +150,7 @@ func DetectedLangs(files []File) map[string]bool {
 	out := map[string]bool{}
 	for _, f := range files {
 		switch f.Lang {
-		case "go", "js", "css":
+		case "go", "js", "css", "py":
 			out[f.Lang] = true
 		}
 	}

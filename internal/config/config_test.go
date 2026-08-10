@@ -10,7 +10,11 @@ func TestParseLangs(t *testing.T) {
 	if len(got) != 3 || got[0] != "go" || got[1] != "js" || got[2] != "css" {
 		t.Fatalf("%v", got)
 	}
-	if _, err := ParseLangs("python"); err == nil {
+	got, err = ParseLangs("python")
+	if err != nil || len(got) != 1 || got[0] != "py" {
+		t.Fatalf("python: %v %v", got, err)
+	}
+	if _, err := ParseLangs("ruby"); err == nil {
 		t.Fatal("expected error")
 	}
 }

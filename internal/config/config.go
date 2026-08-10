@@ -15,7 +15,7 @@ type Config struct {
 	// Patterns are Go package patterns (default ["./..."]).
 	Patterns []string
 
-	// Langs restricts analysis to these languages ("go", "js", "css").
+	// Langs restricts analysis to these languages ("go", "js", "css", "py").
 	// Empty means auto-detect from files present.
 	Langs []string
 
@@ -35,7 +35,7 @@ type Config struct {
 	// default (45s). Negative means no time limit.
 	Timeout time.Duration
 
-	// Entries are extra JavaScript entry-point files (relative to Root or absolute).
+	// Entries are extra JavaScript/Python entry-point files (relative to Root or absolute).
 	Entries []string
 
 	// Ignore is a list of gitignore-style patterns relative to Root.
@@ -86,7 +86,7 @@ func ParseLangs(s string) ([]string, error) {
 		}
 		n := normalizeLang(p)
 		if n == "" {
-			return nil, fmt.Errorf("unknown language %q (want go, js, css)", p)
+			return nil, fmt.Errorf("unknown language %q (want go, js, css, py)", p)
 		}
 		out = append(out, n)
 	}
@@ -117,6 +117,8 @@ func normalizeLang(s string) string {
 		return "js"
 	case "css":
 		return "css"
+	case "py", "python":
+		return "py"
 	default:
 		return ""
 	}
