@@ -40,6 +40,7 @@ The tool prefers **false negatives over false positives**. If a use cannot be pr
 | `-tests` | `true` | Treat Go tests as entry points |
 | `-exported auto\|true\|false` | `auto` | Report unused exported Go symbols (`auto` = yes when a `main` exists) |
 | `-reachable` | `true` | Run Go RTA when a main package exists |
+| `-timeout dur` | `45s` | Max time for Go RTA (`0` = 45s; negative = no limit). Heavy import graphs (btcd, libp2p, IPFS, …) skip RTA instead of hanging. |
 | `-entry path` | | Extra JavaScript entry file (repeatable) |
 | `-ignore glob` | | Extra gitignore-style skip pattern (repeatable) |
 | `-fail-on-findings` | `false` | Exit `1` if anything is found |
@@ -98,6 +99,7 @@ export function legacyHook() {}
 ## Limitations
 
 - Reflection, `//go:linkname`, and cgo-only callees can hide Go uses (same class of unsoundness as `golang.org/x/tools/cmd/deadcode`).
+- Go Rapid Type Analysis is skipped (stderr warning) on huge import graphs (btcd, libp2p, IPFS, Kubernetes, cloud SDKs) or when `-timeout` fires, so a scan cannot hang. Unused-reference analysis still runs.
 - JS computed member access (`obj[name]`, `import(variable)`) is not resolved.
 - CSS does not expand Sass/Less; only `.css` is parsed. Dynamically concatenated class names may look unused.
 - TypeScript types are skipped heuristically, not by a full TS compiler.

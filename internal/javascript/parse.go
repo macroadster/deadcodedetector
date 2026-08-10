@@ -142,8 +142,19 @@ func (p *parser) acceptIdent(s string) bool {
 }
 
 func (p *parser) parse(ex *Extracted) {
+	// Hard cap: every production must consume a token or we force one.
+	// Without this, a stray ",", ")", or "}" at statement level loops
+	// forever — parseExprish returns without advancing and parse retries.
+	steps := 0
+	limit := len(p.toks)*2 + 8
 	for p.peek().kind != tEOF {
+		steps++
+		if steps > limit {
+			return
+		}
+		start := p.i
 		if p.skipTypeOnlyStatement(ex) {
+			p.finishStep(start)
 			continue
 		}
 		t := p.peek()
@@ -153,24 +164,36 @@ func (p *parser) parse(ex *Extracted) {
 				// import() is dynamic; import ... is static.
 				if p.peekN(1).kind == tPunct && p.peekN(1).lit == "(" {
 					p.parseDynamicImport(ex)
-					continue
+				} else {
+					p.parseImport(ex)
 				}
-				p.parseImport(ex)
+				p.finishStep(start)
 				continue
 			case "export":
 				p.parseExport(ex)
+				p.finishStep(start)
 				continue
 			case "require":
 				p.parseRequireCall(ex, "", 0, 0)
+				p.finishStep(start)
 				continue
 			}
 		}
 		// Top-level declaration?
 		if p.looksLikeDecl() {
 			p.parseDecl(ex, false, false)
+			p.finishStep(start)
 			continue
 		}
 		p.parseExprish(ex, 0)
+		p.finishStep(start)
+	}
+}
+
+// finishStep consumes one token when a production made no progress.
+func (p *parser) finishStep(start int) {
+	if p.i <= start && p.peek().kind != tEOF {
+		p.next()
 	}
 }
 
@@ -200,14 +223,17 @@ func (p *parser) skipTypeOnlyStatement(ex *Extracted) bool {
 		if t.lit == "type" && n.kind != tIdent {
 			return false
 		}
-		line := t.line
 		p.next()
 		if t.lit == "type" {
-			// type Alias = ...
+			// type Alias<T> = ...
 			if p.peek().kind == tIdent {
 				p.next()
 			}
-			p.skipUntilStmtEnd()
+			p.skipGeneric()
+			if p.acceptPunct("=") {
+				p.skipTypeExpr()
+			}
+			p.acceptPunct(";")
 		} else {
 			// interface Name { ... }  or interface Name<T> { ... }
 			if p.peek().kind == tIdent {
@@ -219,12 +245,25 @@ func (p *parser) skipTypeOnlyStatement(ex *Extracted) bool {
 				p.skipUntil(func(t token) bool { return t.kind == tPunct && t.lit == "{" })
 			}
 			p.skipBalanced("{", "}")
+			p.acceptPunct(";")
 		}
-		_ = line
 		_ = ex
 		return true
 	case "declare":
 		p.next()
+		if p.peek().kind == tIdent {
+			switch p.peek().lit {
+			case "global", "module", "namespace":
+				p.next()
+				if p.peek().kind == tString || p.peek().kind == tIdent {
+					p.next()
+				}
+				p.skipGeneric()
+				p.skipBalanced("{", "}")
+				p.acceptPunct(";")
+				return true
+			}
+		}
 		p.skipUntilStmtEnd()
 		return true
 	}
@@ -237,23 +276,136 @@ func (p *parser) skipGeneric() {
 	}
 }
 
+// skipTypeExpr consumes a TypeScript type and stops before the next value
+// statement. Previously skipUntilStmtEnd kept going after the alias's
+// closing `}`, so `type Props = { ... }` swallowed the following
+// `export function` / `useState(...)`.
+func (p *parser) skipTypeExpr() {
+	depthParen, depthBrace, depthBrack, depthAngle := 0, 0, 0, 0
+	started := false
+	steps := 0
+	limit := len(p.toks) + 2
+	for p.peek().kind != tEOF {
+		steps++
+		if steps > limit {
+			return
+		}
+		t := p.peek()
+		if depthParen == 0 && depthBrace == 0 && depthBrack == 0 && depthAngle == 0 && started {
+			if t.kind == tPunct {
+				switch t.lit {
+				case ";", ",", ")", "]", "}":
+					return
+				}
+			}
+			if t.kind == tIdent && isValueStmtStart(t.lit) {
+				// `type X = import("m").Y` is still a type.
+				if t.lit == "import" && p.peekN(1).kind == tPunct && p.peekN(1).lit == "(" {
+					// continue
+				} else {
+					return
+				}
+			}
+		}
+		if t.kind == tPunct {
+			switch t.lit {
+			case "(":
+				depthParen++
+			case ")":
+				if depthParen == 0 {
+					return
+				}
+				depthParen--
+			case "{":
+				depthBrace++
+			case "}":
+				if depthBrace == 0 {
+					return
+				}
+				depthBrace--
+			case "[":
+				depthBrack++
+			case "]":
+				if depthBrack == 0 {
+					return
+				}
+				depthBrack--
+			case "<":
+				depthAngle++
+			case ">":
+				if depthAngle > 0 {
+					depthAngle--
+				}
+			}
+		}
+		p.next()
+		started = true
+	}
+}
+
+func isValueStmtStart(s string) bool {
+	switch s {
+	case "export", "import", "function", "class", "const", "let", "var",
+		"async", "interface", "type", "declare", "enum", "return",
+		"if", "for", "while", "switch", "try", "throw", "break",
+		"continue", "do", "with":
+		return true
+	}
+	return false
+}
+
 func (p *parser) skipUntilStmtEnd() {
 	depth := 0
+	started := false
+	steps := 0
+	limit := len(p.toks) + 2
 	for p.peek().kind != tEOF {
+		steps++
+		if steps > limit {
+			return
+		}
 		t := p.peek()
+		if depth == 0 && started {
+			if t.kind == tPunct && t.lit == ";" {
+				p.next()
+				return
+			}
+			if t.kind == tIdent && isValueStmtStart(t.lit) {
+				return
+			}
+		}
 		if t.kind == tPunct {
 			switch t.lit {
 			case "{", "(", "[", "<":
-				// '<' might be comparison; only treat as nest if we already saw '=' for type.
-				if t.lit == "<" && depth == 0 {
-					p.next()
-					continue
+				if t.lit == "<" && depth == 0 && started {
+					// Comparison or generic in a type; treat as generic nest
+					// only when it looks like one, otherwise ignore.
+					if !looksLikeGeneric(p) {
+						p.next()
+						started = true
+						continue
+					}
 				}
 				depth++
+				p.next()
+				started = true
+				continue
 			case "}", ")", "]", ">":
 				if depth > 0 {
 					depth--
-				} else if t.lit == "}" || t.lit == ";" {
+					p.next()
+					if depth == 0 {
+						nt := p.peek()
+						if nt.kind == tPunct && (nt.lit == "|" || nt.lit == "&" || nt.lit == "[" || nt.lit == "?" || nt.lit == "." || nt.lit == "<") {
+							started = true
+							continue
+						}
+						p.acceptPunct(";")
+						return
+					}
+					continue
+				}
+				if t.lit == "}" || t.lit == ";" {
 					p.next()
 					return
 				}
@@ -265,6 +417,7 @@ func (p *parser) skipUntilStmtEnd() {
 			}
 		}
 		p.next()
+		started = true
 	}
 }
 
@@ -279,7 +432,13 @@ func (p *parser) skipBalanced(open, close string) {
 		return
 	}
 	depth := 1
+	steps := 0
+	limit := len(p.toks) + 2
 	for p.peek().kind != tEOF && depth > 0 {
+		steps++
+		if steps > limit {
+			return
+		}
 		t := p.next()
 		if t.kind == tPunct {
 			if t.lit == open {
@@ -389,9 +548,15 @@ func (p *parser) parseExport(ex *Extracted) {
 			p.next()
 			typeOnly = true
 		} else if n1.kind == tIdent {
-			p.next()
-			// export type Alias = ...  (type-only, skip)
-			p.skipUntilStmtEnd()
+			p.next() // type
+			if p.peek().kind == tIdent {
+				p.next() // Alias
+			}
+			p.skipGeneric()
+			if p.acceptPunct("=") {
+				p.skipTypeExpr()
+			}
+			p.acceptPunct(";")
 			return
 		}
 	}
@@ -549,11 +714,22 @@ func (p *parser) parseDecl(ex *Extracted, exported, ignored bool) {
 }
 
 func (p *parser) parseBindingList(ex *Extracted, exported, ignored bool, kind string) {
+	steps := 0
+	limit := len(p.toks) + 2
 	for {
+		steps++
+		if steps > limit {
+			break
+		}
+		start := p.i
 		p.parseBinding(ex, exported, ignored, kind)
 		// initializer
 		if p.acceptPunct("=") {
 			p.parseExprish(ex, 1)
+		}
+		if p.i <= start {
+			// e.g. `const` with no binding — do not spin.
+			break
 		}
 		if !p.acceptPunct(",") {
 			break
@@ -610,14 +786,45 @@ func (p *parser) skipTypeAnnot() {
 	if !p.acceptPunct(":") {
 		return
 	}
-	// Skip a TypeScript type. Stop at , = ; ) ] } or => at depth 0.
-	// A following `{` may be an object type OR a function body; if we just
-	// saw `)` the `{` is a body (caller handles). Object types are `{`.
+	// Skip a TypeScript type. Stop at , = ; ) ] } at depth 0.
+	// `{` after a complete type is a function body (`(): string {`), not
+	// an object type. Object types are `{` immediately after `:` / `|` / `&`.
 	depthParen, depthBrack, depthAngle := 0, 0, 0
 	depthBrace := 0
 	started := false
+	var prev token
+	steps := 0
+	limit := len(p.toks) + 2
 	for p.peek().kind != tEOF {
+		steps++
+		if steps > limit {
+			return
+		}
 		t := p.peek()
+		atTop := depthParen == 0 && depthBrack == 0 && depthBrace == 0 && depthAngle == 0
+		if atTop && started {
+			if t.kind == tIdent && isValueStmtStart(t.lit) {
+				if !(t.lit == "import" && p.peekN(1).kind == tPunct && p.peekN(1).lit == "(") {
+					return
+				}
+			}
+			if t.kind == tPunct {
+				switch t.lit {
+				case ",", ";", "=", ")", "]", "}":
+					return
+				case "=>":
+					// `(): (x: T) => U` continues; `(): U =>` is an arrow body.
+					if !(prev.kind == tPunct && prev.lit == ")") {
+						return
+					}
+				case "{":
+					// Continue only when the type is still being joined.
+					if !typeContinuesWithBrace(prev) {
+						return
+					}
+				}
+			}
+		}
 		if t.kind == tPunct {
 			switch t.lit {
 			case "<":
@@ -629,41 +836,41 @@ func (p *parser) skipTypeAnnot() {
 			case "(":
 				depthParen++
 			case ")":
-				if depthParen == 0 && depthBrack == 0 && depthBrace == 0 && depthAngle == 0 && started {
+				if depthParen == 0 {
 					return
 				}
-				if depthParen > 0 {
-					depthParen--
-				}
+				depthParen--
 			case "[":
 				depthBrack++
 			case "]":
-				if depthBrack > 0 {
-					depthBrack--
-				} else {
+				if depthBrack == 0 {
 					return
 				}
+				depthBrack--
 			case "{":
 				depthBrace++
 			case "}":
-				if depthBrace > 0 {
-					depthBrace--
-				} else {
+				if depthBrace == 0 {
 					return
 				}
-			case ",", ";", "=":
-				if depthParen == 0 && depthBrack == 0 && depthBrace == 0 && depthAngle == 0 {
-					return
-				}
-			case "=>":
-				if depthParen == 0 && depthBrack == 0 && depthBrace == 0 && depthAngle == 0 {
-					return
-				}
+				depthBrace--
 			}
 		}
+		prev = t
 		started = true
 		p.next()
 	}
+}
+
+func typeContinuesWithBrace(prev token) bool {
+	if prev.kind != tPunct {
+		return false
+	}
+	switch prev.lit {
+	case "|", "&", ":", "=>", "=", ",", "<", "(":
+		return true
+	}
+	return false
 }
 
 func (p *parser) consumeSignatureAndBody(ex *Extracted) {
@@ -693,7 +900,14 @@ func (p *parser) collectUntilBalanced(ex *Extracted, open, close string) {
 		return
 	}
 	depth := 1
+	steps := 0
+	limit := len(p.toks)*2 + 8
 	for p.peek().kind != tEOF && depth > 0 {
+		steps++
+		if steps > limit {
+			return
+		}
+		start := p.i
 		t := p.peek()
 		if t.kind == tPunct {
 			if t.lit == open {
@@ -708,6 +922,7 @@ func (p *parser) collectUntilBalanced(ex *Extracted, open, close string) {
 			}
 		}
 		p.collectAtom(ex)
+		p.finishStep(start)
 	}
 }
 
@@ -716,6 +931,9 @@ func (p *parser) collectAtom(ex *Extracted) {
 	switch t.kind {
 	case tString, tTemplate:
 		ex.Strings = append(ex.Strings, t.lit)
+		if t.kind == tTemplate {
+			addTemplateIdentUses(ex, t)
+		}
 		p.next()
 	case tIdent:
 		if t.lit == "require" && p.peekN(1).kind == tPunct && p.peekN(1).lit == "(" {
@@ -782,7 +1000,14 @@ func (p *parser) parseRequireCall(ex *Extracted, assignTo string, line, col int)
 }
 
 func (p *parser) parseExprish(ex *Extracted, stopDepth int) {
+	steps := 0
+	limit := len(p.toks)*2 + 8
 	for p.peek().kind != tEOF {
+		steps++
+		if steps > limit {
+			return
+		}
+		start := p.i
 		t := p.peek()
 		if t.kind == tPunct {
 			switch t.lit {
@@ -792,11 +1017,23 @@ func (p *parser) parseExprish(ex *Extracted, stopDepth int) {
 				if stopDepth == 1 {
 					return
 				}
+				p.finishStep(start)
 				continue
-			case "}", ")", "]", ",", ";":
-				if t.lit == ";" {
-					p.next()
+			case ";":
+				p.next()
+				return
+			case ",":
+				// Nested expression (stopDepth==1) or JSX `{a, b}` caller
+				// needs the comma left in place. At true top-level, consume
+				// so `require('a'), require('b')` does not hang.
+				if stopDepth == 1 {
+					return
 				}
+				p.next()
+				continue
+			case "}", ")", "]":
+				// Leave the closer for the caller (JSX `{expr}`, grouping).
+				// parse() finishStep consumes a stray closer at top level.
 				return
 			}
 		}
@@ -812,12 +1049,34 @@ func (p *parser) parseExprish(ex *Extracted, stopDepth int) {
 			}
 		}
 		p.collectAtom(ex)
+		p.finishStep(start)
 		if stopDepth == 1 {
 			nt := p.peek()
 			if nt.kind == tPunct && (nt.lit == "," || nt.lit == ";" || nt.lit == "{" || nt.lit == ")" || nt.lit == "}") {
 				return
 			}
 		}
+	}
+}
+
+func addTemplateIdentUses(ex *Extracted, t token) {
+	lit := t.lit
+	i := 0
+	for i < len(lit) {
+		if !isIdentStart(lit[i]) {
+			i++
+			continue
+		}
+		j := i + 1
+		for j < len(lit) && isIdentContinue(lit[j]) {
+			j++
+		}
+		name := lit[i:j]
+		i = j
+		if isKeyword(name) {
+			continue
+		}
+		ex.Uses = append(ex.Uses, Use{Name: name, Line: t.line, Col: t.col})
 	}
 }
 
@@ -913,7 +1172,14 @@ func (p *parser) maybeJSX(ex *Extracted) bool {
 		}
 	}
 	// attributes
+	steps := 0
+	limit := len(p.toks)*2 + 8
 	for p.peek().kind != tEOF {
+		steps++
+		if steps > limit {
+			return true
+		}
+		start := p.i
 		t := p.peek()
 		if t.kind == tPunct && (t.lit == ">" || t.lit == "/") {
 			if t.lit == "/" {
@@ -932,14 +1198,16 @@ func (p *parser) maybeJSX(ex *Extracted) bool {
 			p.next()
 			if p.acceptPunct("=") {
 				if p.peek().kind == tPunct && p.peek().lit == "{" {
+					p.next() // {
 					p.parseExprish(ex, 0)
 					p.acceptPunct("}")
 					continue
 				}
 			}
+			p.finishStep(start)
 			continue
 		}
-		p.next()
+		p.finishStep(start)
 	}
 	return true
 }

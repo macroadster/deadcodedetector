@@ -35,6 +35,18 @@ type scanner struct {
 	lastLit string
 }
 
+// StringLiterals returns the contents of JS/TS string and template literals.
+// Template interpolations are flattened; quotes inside ${} are included.
+func StringLiterals(src []byte) []string {
+	var out []string
+	for _, t := range tokenize(src) {
+		if (t.kind == tString || t.kind == tTemplate) && t.lit != "" {
+			out = append(out, t.lit)
+		}
+	}
+	return out
+}
+
 func tokenize(src []byte) []token {
 	s := &scanner{src: src, line: 1, col: 1, last: tEOF}
 	// Shebang
@@ -42,7 +54,13 @@ func tokenize(src []byte) []token {
 		s.skipLine()
 	}
 	var out []token
+	steps := 0
+	limit := len(src)*2 + 8
 	for {
+		steps++
+		if steps > limit {
+			break
+		}
 		s.skipSpaceAndComments()
 		if s.i >= len(s.src) {
 			break
@@ -358,21 +376,28 @@ func (s *scanner) scanTemplate() token {
 			s.advance()
 			continue
 		}
-		if c == '\'' || c == '"' {
-			// skip nested strings inside ${}
+		if depth > 0 && (c == '\'' || c == '"') {
+			// Quoted strings inside ${}: keep their text so CSS class
+			// harvest sees `foo${on ? ' is-on' : ''}`.
 			q := c
 			s.advance()
+			b.WriteByte(' ')
 			for s.i < len(s.src) && s.src[s.i] != q {
 				if s.src[s.i] == '\\' {
 					s.advance()
+					if s.i < len(s.src) {
+						b.WriteByte(s.src[s.i])
+						s.advance()
+					}
+					continue
 				}
-				if s.i < len(s.src) {
-					s.advance()
-				}
+				b.WriteByte(s.src[s.i])
+				s.advance()
 			}
 			if s.i < len(s.src) {
 				s.advance()
 			}
+			b.WriteByte(' ')
 			continue
 		}
 		b.WriteByte(c)

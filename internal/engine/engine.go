@@ -51,6 +51,7 @@ func Run(cfg config.Config) ([]finding.Finding, error) {
 			Tests:     cfg.Tests,
 			Exported:  cfg.Exported,
 			Reachable: cfg.Reachable,
+			Timeout:   cfg.Timeout,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("go: %w", err)

@@ -38,3 +38,23 @@ html, body {
 .animated {
   animation: fade-in 200ms ease;
 }
+
+.from-template {
+  display: block;
+}
+
+.sl-desk-folder {
+  cursor: pointer;
+}
+
+.is-open {
+  outline: 1px solid blue;
+}
+
+.glued-cell {
+  width: 8px;
+}
+
+.is-focused {
+  outline: 1px solid red;
+}

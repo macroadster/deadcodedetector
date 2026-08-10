@@ -25,6 +25,7 @@ type tsPath struct {
 	prefix string // without *
 	suffix string // after *
 	target string // replacement pattern
+	star   bool   // pattern contained *
 }
 
 func newResolver(root string, absFiles []string) *Resolver {
@@ -88,7 +89,11 @@ func (r *Resolver) loadPackageJSON() {
 }
 
 func (r *Resolver) collectExports(raw json.RawMessage, add func(string)) {
-	if len(raw) == 0 {
+	r.collectExportsDepth(raw, add, 0)
+}
+
+func (r *Resolver) collectExportsDepth(raw json.RawMessage, add func(string), depth int) {
+	if len(raw) == 0 || depth > 32 {
 		return
 	}
 	var s string
@@ -109,7 +114,7 @@ func (r *Resolver) collectExports(raw json.RawMessage, add func(string)) {
 			add(inner)
 			continue
 		}
-		r.collectExports(v, add)
+		r.collectExportsDepth(v, add, depth+1)
 	}
 }
 
@@ -132,21 +137,21 @@ func (r *Resolver) loadTSConfig() {
 		}
 		r.baseURL = cfg.CompilerOptions.BaseURL
 		for pat, targets := range cfg.CompilerOptions.Paths {
-			prefix, suffix := splitStar(pat)
+			prefix, suffix, star := splitStar(pat)
 			for _, t := range targets {
-				r.tsPaths = append(r.tsPaths, tsPath{prefix: prefix, suffix: suffix, target: t})
+				r.tsPaths = append(r.tsPaths, tsPath{prefix: prefix, suffix: suffix, target: t, star: star})
 			}
 		}
 		return
 	}
 }
 
-func splitStar(s string) (string, string) {
+func splitStar(s string) (prefix, suffix string, star bool) {
 	i := strings.IndexByte(s, '*')
 	if i < 0 {
-		return s, ""
+		return s, "", false
 	}
-	return s[:i], s[i+1:]
+	return s[:i], s[i+1:], true
 }
 
 func stripJSONC(b []byte) []byte {
@@ -231,21 +236,26 @@ func (r *Resolver) Resolve(fromAbs, spec string) string {
 
 func (r *Resolver) resolveAlias(spec string) string {
 	for _, p := range r.tsPaths {
-		if p.suffix == "" && p.prefix == spec {
-			return r.resolveFrom(r.root, p.target)
-		}
-		if p.suffix == "" {
+		if !p.star {
+			if p.prefix == spec {
+				return r.resolveFrom(r.root, p.target)
+			}
 			continue
 		}
-		if strings.HasPrefix(spec, p.prefix) && strings.HasSuffix(spec, p.suffix) {
-			mid := spec[len(p.prefix) : len(spec)-len(p.suffix)]
-			target := strings.Replace(p.target, "*", mid, 1)
-			if abs := r.resolveFrom(filepath.Join(r.root, r.baseURL), target); abs != "" {
-				return abs
-			}
-			if abs := r.resolveFrom(r.root, target); abs != "" {
-				return abs
-			}
+		if !strings.HasPrefix(spec, p.prefix) || !strings.HasSuffix(spec, p.suffix) {
+			continue
+		}
+		midEnd := len(spec) - len(p.suffix)
+		if midEnd < len(p.prefix) {
+			continue
+		}
+		mid := spec[len(p.prefix):midEnd]
+		target := strings.Replace(p.target, "*", mid, 1)
+		if abs := r.resolveFrom(filepath.Join(r.root, r.baseURL), target); abs != "" {
+			return abs
+		}
+		if abs := r.resolveFrom(r.root, target); abs != "" {
+			return abs
 		}
 	}
 	if r.baseURL != "" {

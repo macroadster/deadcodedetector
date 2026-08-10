@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Config is the user-facing analysis configuration.
@@ -29,6 +30,10 @@ type Config struct {
 	// is available. Functions that are referenced only from dead code are then
 	// reported as unreachable.
 	Reachable bool
+
+	// Timeout bounds Go reachability (SSA+RTA). Zero means the detector
+	// default (45s). Negative means no time limit.
+	Timeout time.Duration
 
 	// Entries are extra JavaScript entry-point files (relative to Root or absolute).
 	Entries []string

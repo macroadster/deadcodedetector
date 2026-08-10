@@ -40,6 +40,7 @@ func run(args []string) int {
 	tests := fs.Bool("tests", true, "treat Go tests as entry points")
 	exported := fs.String("exported", "auto", "report unused exported Go symbols: auto, true, false")
 	reachable := fs.Bool("reachable", true, "run Go reachability analysis when a main package exists")
+	timeout := fs.Duration("timeout", 0, "max time for Go reachability (0 = 45s; negative = no limit)")
 	fail := fs.Bool("fail-on-findings", false, "exit 1 if any dead code is found")
 	var entries, ignores multiFlag
 	fs.Var(&entries, "entry", "JavaScript entry file (repeatable)")
@@ -56,6 +57,7 @@ func run(args []string) int {
 	cfg.Format = *format
 	cfg.Tests = *tests
 	cfg.Reachable = *reachable
+	cfg.Timeout = *timeout
 	cfg.FailOnFindings = *fail
 	cfg.Entries = entries
 	cfg.Ignore = ignores

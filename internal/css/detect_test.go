@@ -49,9 +49,43 @@ func TestSiteCSS(t *testing.T) {
 	if got["unused-spin"] != finding.UnusedKeyframes {
 		t.Errorf("unused-spin: %q", got["unused-spin"])
 	}
-	for _, live := range []string{".hero", ".hero.title", ".is-ready", "#app", "fade-in", "html, body"} {
+	for _, live := range []string{
+		".hero", ".hero.title", ".is-ready", "#app", "fade-in", "html, body",
+		".from-template", ".sl-desk-folder", ".is-open", ".glued-cell", ".is-focused",
+	} {
 		if _, ok := got[live]; ok {
 			t.Errorf("false positive %s", live)
+		}
+	}
+}
+
+func TestHarvestTemplateClasses(t *testing.T) {
+	src := []byte("export function Desk({ open, focused, tone }) {\n" +
+		"  // don't let apostrophes in comments break harvest\n" +
+		"  return (\n" +
+		"    <div className={`sl-desk-icon sl-desk-folder ${tone}${open ? ' is-open' : ''}`}>\n" +
+		"      <span className={`sl-fw${focused ? ' is-focused' : ''}${maxed ? ' is-maximized' : ''}`} />\n" +
+		"      <span className={`sl-blockmap-cell${hot ? ' is-hot' : ''}`} />\n" +
+		"      <div className={`sl-bubble assistant typing${busy ? ' sl-bubble-work' : ''}`} />\n" +
+		"    </div>\n" +
+		"  )\n" +
+		"}\n")
+	u := &usage{
+		classes: map[string]bool{},
+		ids:     map[string]bool{},
+		attrs:   map[string]bool{},
+		tags:    map[string]bool{},
+		words:   map[string]bool{},
+	}
+	harvestUsage(src, "js", u)
+	for _, w := range []string{
+		"sl-desk-icon", "sl-desk-folder", "is-open",
+		"sl-fw", "is-focused", "is-maximized",
+		"sl-blockmap-cell", "is-hot",
+		"sl-bubble", "typing", "sl-bubble-work",
+	} {
+		if !u.hasClass(w) {
+			t.Errorf("template class %q not counted; words=%v", w, u.words)
 		}
 	}
 }

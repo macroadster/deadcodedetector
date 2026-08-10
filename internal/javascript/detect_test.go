@@ -1,8 +1,10 @@
 package javascript
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/eric/deadcodedetector/internal/finding"
@@ -102,6 +104,151 @@ function deadTS(n: number) { return n; }
 	}
 }
 
+func TestTSXTypeAliasDoesNotSwallowUses(t *testing.T) {
+	src := []byte(`
+import { useEffect, useState } from 'react'
+import { ErrorBox, Loading } from '../components/Loading'
+
+type Props = {
+  token: string
+  onLoggedIn: (session: Session) => void
+  onNavigate: (path: string) => void
+}
+
+export function MagicLinkPage({ token, onLoggedIn, onNavigate }: Props) {
+  const [error, setError] = useState<string | null>(null)
+  useEffect(() => {
+    onLoggedIn(token)
+    onNavigate('/demo')
+  }, [token, onLoggedIn, onNavigate])
+  return (
+    <div>
+      {!error && <Loading label="Validating…" />}
+      {error && <ErrorBox message={error} />}
+    </div>
+  )
+}
+`)
+	ex := extract(src)
+	uses := map[string]bool{}
+	for _, u := range ex.Uses {
+		uses[u.Name] = true
+	}
+	for _, name := range []string{"useState", "useEffect", "onLoggedIn", "onNavigate", "Loading", "ErrorBox", "error"} {
+		if !uses[name] {
+			t.Errorf("missing use %s; uses=%v exports=%v", name, uses, ex.Exports)
+		}
+	}
+	var exports []string
+	for _, e := range ex.Exports {
+		exports = append(exports, e.Name)
+	}
+	if !contains(exports, "MagicLinkPage") {
+		t.Fatalf("type Props swallowed the export; exports=%v uses=%v", exports, uses)
+	}
+}
+
+func TestUseClientPreambleStillParsesImports(t *testing.T) {
+	src := []byte(`
+'use client'
+import { useState } from 'react'
+import { libraryTone, DOCK_PINS_KEY } from './desktop/helpers'
+
+export function Desktop() {
+  const [pins, setPins] = useState<string[]>([])
+  return <div className={libraryTone('folder')}>{DOCK_PINS_KEY}</div>
+}
+`)
+	ex := extract(src)
+	uses := map[string]bool{}
+	for _, u := range ex.Uses {
+		uses[u.Name] = true
+	}
+	if !uses["useState"] || !uses["libraryTone"] || !uses["DOCK_PINS_KEY"] {
+		t.Fatalf("uses=%v", uses)
+	}
+	found := false
+	for _, imp := range ex.Imports {
+		for _, n := range imp.Named {
+			if n.Local == "libraryTone" || n.Remote == "libraryTone" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("import of libraryTone missing: %+v", ex.Imports)
+	}
+}
+
+func TestReturnTypeDoesNotSwallowFunctionBody(t *testing.T) {
+	src := []byte(`
+import { useState } from 'react'
+import { helper } from './h.js'
+
+function fromProduct(m: MailboxEmail): DemoEmail {
+  return helper(m)
+}
+
+function kindLabel(kind: DemoEmail['kind']): string {
+  return helper(kind)
+}
+
+export function Page(): JSX.Element {
+  const [v, setV] = useState<string | null>(null)
+  return <div>{fromProduct(v)}{kindLabel('x')}{setV}</div>
+}
+`)
+	ex := extract(src)
+	uses := map[string]bool{}
+	for _, u := range ex.Uses {
+		uses[u.Name] = true
+	}
+	for _, name := range []string{"helper", "useState", "fromProduct", "kindLabel"} {
+		if !uses[name] {
+			t.Errorf("missing use %s; uses=%v", name, uses)
+		}
+	}
+	var exports []string
+	for _, e := range ex.Exports {
+		exports = append(exports, e.Name)
+	}
+	if !contains(exports, "Page") {
+		t.Fatalf("export swallowed; exports=%v uses=%v", exports, uses)
+	}
+}
+
+func TestObjectReturnTypeThenBody(t *testing.T) {
+	src := []byte(`
+import { used } from './u.js'
+export function wrap(): { a: number } {
+  return { a: used() }
+}
+`)
+	ex := extract(src)
+	uses := map[string]bool{}
+	for _, u := range ex.Uses {
+		uses[u.Name] = true
+	}
+	if !uses["used"] {
+		t.Fatalf("object return type swallowed body; uses=%v", uses)
+	}
+}
+
+func TestTemplateInterpolationIsUse(t *testing.T) {
+	src := []byte("import { DOCK_PINS_KEY, libraryTone } from './h.js'\nexport function f(me) { return `${DOCK_PINS_KEY}:${me.id}` + libraryTone('x') }\n")
+	ex := extract(src)
+	uses := map[string]bool{}
+	for _, u := range ex.Uses {
+		uses[u.Name] = true
+	}
+	if !uses["DOCK_PINS_KEY"] {
+		t.Fatalf("template interpolation not a use; uses=%v strings=%v", uses, ex.Strings)
+	}
+	if !uses["libraryTone"] {
+		t.Fatalf("call not a use; uses=%v", uses)
+	}
+}
+
 func TestJSXComponentUse(t *testing.T) {
 	src := []byte(`
 import { Button } from './ui.js';
@@ -157,6 +304,93 @@ func TestAppDeadCode(t *testing.T) {
 	}
 	if _, ok := byName["live"]; ok {
 		t.Errorf("live is the entry export / function used locally")
+	}
+}
+
+func TestTSConfigStarAlias(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "tsconfig.json"), []byte(`{
+  "compilerOptions": { "paths": { "@/*": ["./src/*"] } }
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srcDir := filepath.Join(dir, "src")
+	comp := filepath.Join(srcDir, "components")
+	if err := os.MkdirAll(filepath.Join(srcDir, "app"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(comp, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "app", "page.tsx"), []byte(`
+import { HomeClient } from '@/components/HomeClient'
+export default function Page() { return <HomeClient /> }
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(comp, "HomeClient.tsx"), []byte(`
+export function HomeClient() { return <div /> }
+function deadLocal() { return 0 }
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := ignore.FromPatterns(nil)
+	files, err := walk.Discover(dir, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs, err := Detect(dir, files, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range fs {
+		if f.Kind == finding.UnusedFile && (f.Name == "src/components/HomeClient.tsx" || strings.Contains(f.Path, "HomeClient")) {
+			t.Fatalf("@/ alias did not mark HomeClient live: %v", fs)
+		}
+	}
+	foundDead := false
+	for _, f := range fs {
+		if f.Name == "deadLocal" {
+			foundDead = true
+		}
+	}
+	if !foundDead {
+		t.Fatalf("expected deadLocal in live file; got %v", fs)
+	}
+}
+
+func TestNoUnusedExportsWithoutEntries(t *testing.T) {
+	dir := t.TempDir()
+	src := []byte(`
+export const DOCK_PINS_KEY = 'sl-desktop-dock-pins'
+export function libraryTone(icon?: string): string { return icon || 'tone' }
+function localDead() { return 1 }
+`)
+	if err := os.WriteFile(filepath.Join(dir, "helpers.ts"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := ignore.FromPatterns(nil)
+	files, err := walk.Discover(dir, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs, err := Detect(dir, files, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range fs {
+		if f.Kind == finding.UnusedExport || f.Kind == finding.UnusedFile {
+			t.Errorf("isolated module must not report %s %s (no entry graph)", f.Kind, f.Name)
+		}
+	}
+	foundDead := false
+	for _, f := range fs {
+		if f.Name == "localDead" {
+			foundDead = true
+		}
+	}
+	if !foundDead {
+		t.Fatalf("still expect unused local; got %v", fs)
 	}
 }
 
