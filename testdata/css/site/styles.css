@@ -1,0 +1,40 @@
+html, body {
+  margin: 0;
+}
+
+.hero {
+  font-size: 2rem;
+}
+
+.hero.title {
+  font-weight: 700;
+}
+
+.is-ready {
+  opacity: 1;
+}
+
+.old-modal {
+  display: none;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+#unused-id {
+  color: red;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes unused-spin {
+  to { transform: rotate(360deg); }
+}
+
+.animated {
+  animation: fade-in 200ms ease;
+}
