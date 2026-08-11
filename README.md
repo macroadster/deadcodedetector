@@ -1,6 +1,6 @@
 # dcd — dead code detector
 
-A single CLI that finds unused and unreachable code in **Go**, **JavaScript/TypeScript**, **CSS**, and **Python**.
+A single CLI that finds unused and unreachable code in **Go**, **JavaScript/TypeScript**, **CSS**, **Python**, and **Java**.
 
 ```
 dcd [flags] [path]
@@ -29,6 +29,7 @@ go build -o dcd ./cmd/dcd
 | **JavaScript / TypeScript** | Unreachable files, unused exports, unused imports, and unused top-level functions / classes / variables. Follows `import` / `export`, `require` / `module.exports`, `import()`, JSX tags, `package.json` entry fields, `tsconfig` path aliases, and HTML `<script src>`. |
 | **CSS** | Selectors whose classes, IDs, or attributes never appear in HTML / JS / Go templates, plus unused `@keyframes`. |
 | **Python** | Unreachable modules, unused imports, and unused top-level functions / classes / variables. Follows `import` / `from … import` (including nested imports), package-relative imports, `__main__` guards, and pytest-style test discovery. |
+| **Java** | Unreachable compilation units, unused imports, unused private methods / fields, and unused public static methods. Follows `import` / `import static`, same-package references, FQCNs, `main`, JUnit/TestNG-style tests, and common Spring / JAX-RS entry annotations. |
 
 The tool prefers **false negatives over false positives**. If a use cannot be proven, the symbol is kept.
 
@@ -36,13 +37,13 @@ The tool prefers **false negatives over false positives**. If a use cannot be pr
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `-lang go,js,css,py` | auto-detect | Restrict which analyzers run |
+| `-lang go,js,css,py,java` | auto-detect | Restrict which analyzers run |
 | `-format text\|json\|sarif` | `text` | Output format |
 | `-tests` | `true` | Treat Go tests as entry points |
 | `-exported auto\|true\|false` | `auto` | Report unused exported Go symbols (`auto` = yes when a `main` exists) |
 | `-reachable` | `true` | Run Go RTA when a main package exists |
 | `-timeout dur` | `45s` | Max time for Go RTA (`0` = 45s; negative = no limit). Heavy import graphs (btcd, libp2p, IPFS, …) skip RTA instead of hanging. |
-| `-entry path` | | Extra JavaScript/Python entry file (repeatable) |
+| `-entry path` | | Extra JavaScript/Python/Java entry file (repeatable) |
 | `-ignore glob` | | Extra gitignore-style skip pattern (repeatable) |
 | `-fail-on-findings` | `false` | Exit `1` if anything is found |
 
@@ -64,6 +65,9 @@ dcd -lang js -entry src/main.tsx .
 # Python only
 dcd -lang py .
 
+# Java only
+dcd -lang java .
+
 # Machine-readable
 dcd -format json . > dead.json
 dcd -format sarif . > dcd.sarif
@@ -71,7 +75,7 @@ dcd -format sarif . > dcd.sarif
 
 ## Ignore rules
 
-Default skips include `node_modules/`, `vendor/`, `dist/`, `build/`, `.git/`, `testdata/`, minified bundles, and generated `*.pb.go` / `*_gen.go` files. `.gitignore` and `.dcdignore` in the scan root are honoured.
+Default skips include `node_modules/`, `vendor/`, `dist/`, `build/`, `target/`, `.gradle/`, `.git/`, `testdata/`, minified bundles, `*.class`, and generated `*.pb.go` / `*_gen.go` files. `.gitignore` and `.dcdignore` in the scan root are honoured.
 
 Suppress one symbol:
 
@@ -91,6 +95,11 @@ def legacy_hook():
     pass
 ```
 
+```java
+// dcd:ignore
+private void legacyHook() {}
+```
+
 ```css
 /* dcd:ignore */
 .legacy-modal { display: none; }
@@ -108,6 +117,8 @@ def legacy_hook():
 
 **Python.** Tokenizes Python, extracts imports / top-level defs / uses (including f-string interpolations), builds a module graph from `__main__` guards, test files, and conventional entry names, then mark-and-sweeps. Package `__init__` re-exports and names listed in `__all__` are kept. Methods inside classes are not reported (prefer false negatives).
 
+**Java.** Tokenizes Java (including text blocks), extracts package / imports / types / members / uses, builds a type graph from `main`, `*Test.java`, `src/test/`, Spring/JAX-RS annotations, and conventional `Main`/`Application` names, then mark-and-sweeps. `Class.forName("…")` and other FQCN string literals, plus `web.xml` / `.properties` class names (`servlet-class`, Hadoop config values, log4j appenders), count as uses. Importing `Outer.Nested` keeps `Outer`. Private unused members are reported; public instance methods are kept (prefer false negatives). `@Override`, other annotations, JavaBean accessors, `enum` constants, and Hadoop Record helpers (`signature`, `slurpRaw`, `compareRaw`) are kept. `package-info.java` / `module-info.java` are skipped.
+
 ## Limitations
 
 - Reflection, `//go:linkname`, and cgo-only callees can hide Go uses (same class of unsoundness as `golang.org/x/tools/cmd/deadcode`).
@@ -116,6 +127,7 @@ def legacy_hook():
 - CSS does not expand Sass/Less; only `.css` is parsed. Dynamically concatenated class names may look unused.
 - TypeScript types are skipped heuristically, not by a full TS compiler.
 - Python `importlib`, `getattr`, and string-based dynamic imports are not fully resolved; class methods are not analyzed.
+- Java is tokenized, not compiled: SPI/`ServiceLoader` names that never appear as a literal FQCN, and methods referenced only from YAML, may look unused. Public instance methods and anything annotated are kept. Lombok-generated members are not modeled.
 
 ## Development
 

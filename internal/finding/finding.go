@@ -14,6 +14,7 @@ const (
 	JavaScript Language = "javascript"
 	CSS        Language = "css"
 	Python     Language = "python"
+	Java       Language = "java"
 )
 
 // Kind classifies a dead-code finding.

@@ -17,6 +17,8 @@ var DefaultPatterns = []string{
 	"vendor/",
 	"dist/",
 	"build/",
+	"target/",
+	".gradle/",
 	"coverage/",
 	".next/",
 	".nuxt/",
@@ -39,6 +41,7 @@ var DefaultPatterns = []string{
 	"*_gen.go",
 	"*_generated.go",
 	"generated.go",
+	"*.class",
 }
 
 // Matcher decides whether a slash-separated relative path should be skipped.

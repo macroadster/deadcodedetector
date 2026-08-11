@@ -11,6 +11,7 @@ import (
 	"github.com/eric/deadcodedetector/internal/finding"
 	godet "github.com/eric/deadcodedetector/internal/golang"
 	"github.com/eric/deadcodedetector/internal/ignore"
+	javadet "github.com/eric/deadcodedetector/internal/java"
 	jsdet "github.com/eric/deadcodedetector/internal/javascript"
 	pydet "github.com/eric/deadcodedetector/internal/python"
 	"github.com/eric/deadcodedetector/internal/walk"
@@ -79,6 +80,13 @@ func Run(cfg config.Config) ([]finding.Finding, error) {
 			return nil, fmt.Errorf("python: %w", err)
 		}
 		fs = append(fs, pyfs...)
+	}
+	if cfg.Wants("java", detected) {
+		jfs, err := javadet.Detect(abs, files, cfg.Entries)
+		if err != nil {
+			return nil, fmt.Errorf("java: %w", err)
+		}
+		fs = append(fs, jfs...)
 	}
 	finding.Sort(fs)
 	return fs, nil

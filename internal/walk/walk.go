@@ -20,7 +20,7 @@ const MaxSourceBytes = 2 << 20 // 2 MiB
 type File struct {
 	Abs  string
 	Rel  string // slash-separated, relative to root
-	Lang string // "go", "js", "css", "html", "py"
+	Lang string // "go", "js", "css", "html", "py", "java", "xml", "props"
 }
 
 // Discover walks root and returns files that look like source, applying m.
@@ -98,7 +98,7 @@ func defaultHiddenDir(name string) bool {
 		".next", ".nuxt", ".cache", ".output",
 		".venv", ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache",
 		".direnv", ".grok", ".grok-home", ".playwright-mcp",
-		".tmp", ".tmp-e2e":
+		".tmp", ".tmp-e2e", ".gradle", ".mvn":
 		return true
 	default:
 		return false
@@ -140,6 +140,12 @@ func langOf(name string) string {
 		return "html"
 	case ".py", ".pyi":
 		return "py"
+	case ".java":
+		return "java"
+	case ".xml":
+		return "xml"
+	case ".properties":
+		return "props"
 	default:
 		return ""
 	}
@@ -150,7 +156,7 @@ func DetectedLangs(files []File) map[string]bool {
 	out := map[string]bool{}
 	for _, f := range files {
 		switch f.Lang {
-		case "go", "js", "css", "py":
+		case "go", "js", "css", "py", "java":
 			out[f.Lang] = true
 		}
 	}
