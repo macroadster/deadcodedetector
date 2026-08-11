@@ -1,0 +1,2 @@
+def leftover():
+    return "gone"

@@ -29,6 +29,23 @@ func TestRunJSAndCSS(t *testing.T) {
 	}
 }
 
+func TestRunPython(t *testing.T) {
+	root := testdata(t, "py", "app")
+	fs, err := Run(config.Config{Root: root, Tests: true, Format: "text"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var py int
+	for _, f := range fs {
+		if f.Language == finding.Python {
+			py++
+		}
+	}
+	if py == 0 {
+		t.Fatalf("expected Python findings, got %v", fs)
+	}
+}
+
 func testdata(t *testing.T, elems ...string) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)

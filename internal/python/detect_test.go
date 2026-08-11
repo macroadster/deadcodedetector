@@ -3,10 +3,12 @@ package python
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/eric/deadcodedetector/internal/finding"
+	"github.com/eric/deadcodedetector/internal/ignore"
 	"github.com/eric/deadcodedetector/internal/walk"
 )
 
@@ -465,6 +467,59 @@ def test_ok():
 	fs := mustDetect(t, dir)
 	assertNoFinding(t, fs, "client")
 	assertNoFinding(t, fs, "pytest_configure")
+}
+
+func TestAppDeadCode(t *testing.T) {
+	root := testdata(t, "py", "app")
+	files, err := walk.Discover(root, ignore.FromPatterns(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs, err := Detect(root, files, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]finding.Kind{}
+	for _, f := range fs {
+		byName[f.Name] = f.Kind
+		t.Logf("finding: %s", f)
+	}
+	want := map[string]finding.Kind{
+		"never_used":     finding.UnusedImport,
+		"leftover":       finding.UnusedImport,
+		"os":             finding.UnusedImport,
+		"side":           finding.UnusedImport,
+		"local_dead":     finding.UnusedFunction,
+		"unused_named":   finding.UnusedExport,
+		"_hidden":        finding.UnusedFunction,
+		"unused_in_util": finding.UnusedExport,
+		"orphan.py":      finding.UnusedFile,
+	}
+	for name, kind := range want {
+		if byName[name] != kind {
+			t.Errorf("%s: got %q want %q\nall=%v", name, byName[name], kind, byName)
+		}
+	}
+	for _, live := range []string{"used", "live", "helper", "ignored_dead"} {
+		if _, ok := byName[live]; ok {
+			t.Errorf("%s should be live", live)
+		}
+	}
+	assertNoUnusedFile(t, fs, "side.py")
+	assertNoUnusedFile(t, fs, "used.py")
+	assertNoUnusedFile(t, fs, "unused_export.py")
+	assertNoUnusedFile(t, fs, "__init__.py")
+	assertNoUnusedFile(t, fs, "util.py")
+}
+
+func testdata(t *testing.T, elems ...string) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("no caller")
+	}
+	parts := append([]string{filepath.Dir(file), "..", "..", "testdata"}, elems...)
+	return filepath.Clean(filepath.Join(parts...))
 }
 
 func writeTree(t *testing.T, dir string, files map[string]string) {
