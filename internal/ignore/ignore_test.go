@@ -2,6 +2,20 @@ package ignore
 
 import "testing"
 
+func TestDefaultRuntimeDirs(t *testing.T) {
+	m := FromPatterns(DefaultPatterns)
+	for _, rel := range []string{
+		"ml/.venv",
+		"data/uploads/agent-sandbox",
+		"foo/.grok-home",
+		"frontend/node_modules",
+	} {
+		if !m.Ignore(rel, true) {
+			t.Errorf("expected default ignore of dir %s", rel)
+		}
+	}
+}
+
 func TestMatcher(t *testing.T) {
 	m := FromPatterns([]string{
 		"node_modules/",

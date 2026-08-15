@@ -98,8 +98,10 @@ func Detect(root string, files []walk.File, entries []string) ([]finding.Finding
 		if !live {
 			continue // unused file already reported; skip inner noise
 		}
-		// Entry files are public surface — do not flag their exports.
-		if !entrySet[abs] {
+		// Unused exports need a real entry graph. Isolated scans (a single
+		// helpers.ts, a pages/ folder with no index) cannot prove an export
+		// is dead — prefer false negatives, matching unused-file policy.
+		if len(entrySet) > 0 && !entrySet[abs] {
 			fs = append(fs, unusedExports(m, usedExports[abs])...)
 		}
 		fs = append(fs, unusedImportsAndLocals(m)...)
@@ -150,6 +152,12 @@ func discoverEntries(root string, byAbs map[string]*module, res *Resolver, extra
 	for _, e := range res.PackageEntries() {
 		add(e)
 	}
+	// Next.js App Router / Pages Router entries are always roots.
+	for abs, m := range byAbs {
+		if isFrameworkEntry(m.File.Rel) {
+			add(abs)
+		}
+	}
 	// HTML <script src>
 	for _, h := range html {
 		src, err := os.ReadFile(h.Abs)
@@ -176,10 +184,37 @@ func discoverEntries(root string, byAbs map[string]*module, res *Resolver, extra
 	return out
 }
 
+func isFrameworkEntry(rel string) bool {
+	rel = filepath.ToSlash(rel)
+	base := filepath.Base(rel)
+	switch base {
+	case "page.tsx", "page.ts", "page.jsx", "page.js",
+		"layout.tsx", "layout.ts", "layout.jsx", "layout.js",
+		"template.tsx", "template.ts",
+		"route.ts", "route.js",
+		"middleware.ts", "middleware.js",
+		"loading.tsx", "loading.ts", "loading.jsx", "loading.js",
+		"error.tsx", "error.ts",
+		"not-found.tsx", "not-found.ts",
+		"default.tsx", "default.ts",
+		"_app.tsx", "_app.ts", "_app.jsx", "_app.js",
+		"_document.tsx", "_document.ts",
+		"instrumentation.ts", "instrumentation.js":
+		return true
+	}
+	return false
+}
+
 func htmlScriptSrc(s string) []string {
 	var out []string
 	low := strings.ToLower(s)
+	steps := 0
+	limit := len(s) + 2
 	for {
+		steps++
+		if steps > limit {
+			break
+		}
 		i := strings.Index(low, "<script")
 		if i < 0 {
 			break
@@ -192,8 +227,12 @@ func htmlScriptSrc(s string) []string {
 		if spec, ok := attrValue(tag, "src"); ok {
 			out = append(out, spec)
 		}
-		low = low[i+end+1:]
-		s = s[i+end+1:]
+		next := i + end + 1
+		if next <= 0 || next > len(low) {
+			break
+		}
+		low = low[next:]
+		s = s[next:]
 	}
 	return out
 }

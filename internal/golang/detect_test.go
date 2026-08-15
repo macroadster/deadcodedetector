@@ -93,6 +93,21 @@ func TestLibExportedFlag(t *testing.T) {
 
 func boolPtr(v bool) *bool { return &v }
 
+func TestIsHeavyPath(t *testing.T) {
+	if !isHeavyPath("github.com/btcsuite/btcd/wire") {
+		t.Fatal("expected btcd to be heavy")
+	}
+	if !isHeavyPath("github.com/libp2p/go-libp2p") {
+		t.Fatal("expected libp2p to be heavy")
+	}
+	if isHeavyPath("example.com/foo") {
+		t.Fatal("example.com/foo should not be heavy")
+	}
+	if isHeavyPath("nova.teachx.ai/trace-analysis/starlight") {
+		t.Fatal("local module path should not be heavy")
+	}
+}
+
 func TestSelfNoFalsePositives(t *testing.T) {
 	root := filepath.Clean(filepath.Join(testdata(t), ".."))
 	fs, err := Detect(Options{Root: root, Tests: true, Reachable: true})

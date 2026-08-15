@@ -17,6 +17,8 @@ var DefaultPatterns = []string{
 	"vendor/",
 	"dist/",
 	"build/",
+	"target/",
+	".gradle/",
 	"coverage/",
 	".next/",
 	".nuxt/",
@@ -25,6 +27,11 @@ var DefaultPatterns = []string{
 	"out/",
 	"tmp/",
 	"testdata/",
+	".venv/",
+	"__pycache__/",
+	".grok-home/",
+	"agent-sandbox/",
+	".playwright-mcp/",
 	"*.min.js",
 	"*.min.css",
 	"*.min.mjs",
@@ -34,6 +41,7 @@ var DefaultPatterns = []string{
 	"*_gen.go",
 	"*_generated.go",
 	"generated.go",
+	"*.class",
 }
 
 // Matcher decides whether a slash-separated relative path should be skipped.
@@ -202,18 +210,25 @@ func matchAnySuffix(p pattern, relSegs []string) bool {
 }
 
 func matchSegs(pat, rel []string, full bool) bool {
+	return matchSegsDepth(pat, rel, full, 0)
+}
+
+func matchSegsDepth(pat, rel []string, full bool, depth int) bool {
+	if depth > 64 {
+		return false
+	}
 	if len(pat) == 0 {
 		return !full || len(rel) == 0
 	}
 	if pat[0] == "**" {
 		// Eat zero or more segments.
-		if matchSegs(pat[1:], rel, full) {
+		if matchSegsDepth(pat[1:], rel, full, depth+1) {
 			return true
 		}
 		if len(rel) == 0 {
 			return false
 		}
-		return matchSegs(pat, rel[1:], full)
+		return matchSegsDepth(pat, rel[1:], full, depth+1)
 	}
 	if len(rel) == 0 {
 		return false
@@ -221,7 +236,7 @@ func matchSegs(pat, rel []string, full bool) bool {
 	if !globOK(pat[0], rel[0]) {
 		return false
 	}
-	return matchSegs(pat[1:], rel[1:], full)
+	return matchSegsDepth(pat[1:], rel[1:], full, depth+1)
 }
 
 func matchGlob(pat, name string) bool {

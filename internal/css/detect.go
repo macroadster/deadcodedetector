@@ -15,6 +15,7 @@ import (
 	"github.com/tdewolff/parse/v2/css"
 
 	"github.com/eric/deadcodedetector/internal/finding"
+	"github.com/eric/deadcodedetector/internal/javascript"
 	"github.com/eric/deadcodedetector/internal/walk"
 )
 
@@ -141,7 +142,13 @@ func parseStylesheet(src []byte) ([]rule, []keyframe) {
 		return line, col
 	}
 
+	steps := 0
+	limit := len(src) + 8
 	for {
+		steps++
+		if steps > limit {
+			return rules, keys
+		}
 		gt, _, data := p.Next()
 		off := p.Offset()
 		switch gt {
@@ -590,20 +597,17 @@ var (
 
 func harvestUsage(src []byte, lang string, u *usage) {
 	s := string(src)
-	addWords := func(bag string) {
-		for _, w := range strings.Fields(bag) {
-			w = strings.Trim(w, "\"'`")
-			if w != "" {
-				u.classes[w] = true
-				u.words[w] = true
-			}
+	addClassBag := func(bag string) {
+		for _, w := range cssTokens(bag) {
+			u.classes[w] = true
+			u.words[w] = true
 		}
 	}
 	for _, m := range reClassAttr.FindAllStringSubmatch(s, -1) {
-		addWords(m[1])
+		addClassBag(m[1])
 	}
 	for _, m := range reJSXClass.FindAllStringSubmatch(s, -1) {
-		addWords(m[1])
+		addClassBag(m[1])
 	}
 	for _, m := range reIDAttr.FindAllStringSubmatch(s, -1) {
 		id := strings.TrimSpace(m[1])
@@ -621,21 +625,24 @@ func harvestUsage(src []byte, lang string, u *usage) {
 			u.attrs[strings.ToLower(m[1])] = true
 		}
 	}
-	// Quoted strings: conservative whole-word tokens.
-	for _, m := range reString.FindAllStringSubmatch(s, -1) {
-		lit := m[1] + m[2] + m[3]
-		if lit == "" {
-			continue
-		}
-		u.words[lit] = true
-		for _, w := range strings.FieldsFunc(lit, func(r rune) bool {
-			return r == ' ' || r == '\t' || r == '\n' || r == ',' || r == ';' || r == ':'
-		}) {
-			w = strings.Trim(w, ".#/\\")
-			if w != "" {
-				u.words[w] = true
-				// dotted module access styles.foo already handled as word "foo" if split
+	// Quoted strings and template literals. Split on interpolation /
+	// punctuation so `sl-cell${on ? ' is-on' : ''}` yields sl-cell and is-on.
+	// JS/TS uses the real tokenizer so an apostrophe in prose cannot
+	// swallow the following template (regex harvest does that).
+	var lits []string
+	if lang == "js" {
+		lits = javascript.StringLiterals(src)
+	} else {
+		for _, m := range reString.FindAllStringSubmatch(s, -1) {
+			if lit := m[1] + m[2] + m[3]; lit != "" {
+				lits = append(lits, lit)
 			}
+		}
+	}
+	for _, lit := range lits {
+		u.words[lit] = true
+		for _, w := range cssTokens(lit) {
+			u.words[w] = true
 		}
 		// styles.foo / cls.foo
 		if i := strings.LastIndexByte(lit, '.'); i >= 0 && i+1 < len(lit) {
@@ -644,6 +651,35 @@ func harvestUsage(src []byte, lang string, u *usage) {
 	}
 	// Identifiers after a dot: styles.foo, classList.add — token scan
 	harvestIdents(src, u)
+}
+
+// cssTokens pulls CSS-identifier-like pieces out of a string or template.
+// `foo bar${x ? ' is-on' : ”}` → foo, bar, is-on (not `bar${x`).
+func cssTokens(s string) []string {
+	var out []string
+	i := 0
+	for i < len(s) {
+		if !isCSSTokenStart(s[i]) {
+			i++
+			continue
+		}
+		j := i + 1
+		for j < len(s) && isCSSTokenCont(s[j]) {
+			j++
+		}
+		out = append(out, s[i:j])
+		i = j
+	}
+	return out
+}
+
+func isCSSTokenStart(c byte) bool {
+	return c == '_' || c == '-' ||
+		(c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+}
+
+func isCSSTokenCont(c byte) bool {
+	return isCSSTokenStart(c) || (c >= '0' && c <= '9')
 }
 
 func harvestIdents(src []byte, u *usage) {

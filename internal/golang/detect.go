@@ -9,11 +9,20 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"golang.org/x/tools/go/packages"
 
 	"github.com/eric/deadcodedetector/internal/finding"
 )
+
+// DefaultReachTimeout bounds Rapid Type Analysis. SSA+RTA over trees that
+// pull in btcd/libp2p/IPFS can run for many minutes with no output; the
+// unused-reference pass still completes.
+const DefaultReachTimeout = 45 * time.Second
+
+// MaxRTAPackages is the largest import graph we will build SSA for.
+const MaxRTAPackages = 400
 
 // Options control Go analysis.
 type Options struct {
@@ -22,6 +31,10 @@ type Options struct {
 	Tests     bool
 	Exported  *bool // nil = auto
 	Reachable bool
+	// Timeout bounds the optional RTA pass. Zero uses DefaultReachTimeout.
+	// A negative value disables the time limit (still subject to MaxRTAPackages
+	// and the heavy-module heuristic).
+	Timeout time.Duration
 }
 
 // Detect loads the Go module under root and reports dead code.
@@ -38,13 +51,11 @@ func Detect(opts Options) ([]finding.Finding, error) {
 		patterns = []string{"./..."}
 	}
 
+	// Load local packages only (export data for imports). This is enough
+	// for unused-reference analysis and does not build SSA of every dep.
 	mode := packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
 		packages.NeedImports | packages.NeedTypes | packages.NeedTypesSizes |
-		packages.NeedSyntax | packages.NeedTypesInfo | packages.NeedModule |
-		packages.NeedDeps
-	if opts.Reachable {
-		mode = packages.LoadAllSyntax | packages.NeedModule
-	}
+		packages.NeedSyntax | packages.NeedTypesInfo | packages.NeedModule
 
 	cfg := &packages.Config{
 		Mode:  mode,
@@ -63,7 +74,10 @@ func Detect(opts Options) ([]finding.Finding, error) {
 
 	initial := initialPackages(pkgs)
 	if len(initial) == 0 {
-		return nil, nil
+		// Monorepos (starlight): the scan root has no go.mod, but
+		// backend/ does. Analyze each nested module instead of silently
+		// reporting nothing.
+		return detectNestedModules(opts, root)
 	}
 	moduleDir := moduleDirOf(initial, root)
 	reportExported := decideExported(opts.Exported, initial)
@@ -72,11 +86,141 @@ func Detect(opts Options) ([]finding.Finding, error) {
 	fs = append(fs, unusedSymbols(initial, reportExported, moduleDir)...)
 
 	if opts.Reachable {
-		if extra, err := unreachable(pkgs, opts.Tests, moduleDir, reportExported); err == nil {
+		if extra, why := maybeUnreachable(opts, root, patterns, initial, moduleDir, reportExported); why != "" {
+			fmt.Fprintf(os.Stderr, "dcd: skipping Go reachability: %s\n", why)
+		} else if len(extra) > 0 {
 			fs = dedup(append(fs, extra...))
 		}
 	}
 	return fs, nil
+}
+
+func detectNestedModules(opts Options, root string) ([]finding.Finding, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	var all []finding.Finding
+	for _, e := range entries {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		dir := filepath.Join(root, e.Name())
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+			continue
+		}
+		sub := opts
+		sub.Root = dir
+		fs, err := Detect(sub)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dcd: go: skip %s: %v\n", filepath.Base(dir), err)
+			continue
+		}
+		all = append(all, fs...)
+	}
+	return all, nil
+}
+
+func maybeUnreachable(opts Options, root string, patterns []string, initial []*packages.Package, moduleDir string, reportExported bool) ([]finding.Finding, string) {
+	if why := rtaSkipReason(initial); why != "" {
+		return nil, why
+	}
+	timeout := opts.Timeout
+	if timeout == 0 {
+		timeout = DefaultReachTimeout
+	}
+	type result struct {
+		fs  []finding.Finding
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		cfg := &packages.Config{
+			Mode:  packages.LoadAllSyntax | packages.NeedModule,
+			Dir:   root,
+			Tests: opts.Tests,
+			Env:   os.Environ(),
+			Fset:  token.NewFileSet(),
+		}
+		pkgs, err := packages.Load(cfg, patterns...)
+		if err != nil {
+			ch <- result{nil, err}
+			return
+		}
+		fs, err := unreachable(pkgs, opts.Tests, moduleDir, reportExported)
+		ch <- result{fs, err}
+	}()
+	if timeout < 0 {
+		r := <-ch
+		if r.err != nil {
+			return nil, r.err.Error()
+		}
+		return r.fs, ""
+	}
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			return nil, r.err.Error()
+		}
+		return r.fs, ""
+	case <-time.After(timeout):
+		return nil, fmt.Sprintf("timed out after %s", timeout)
+	}
+}
+
+func rtaSkipReason(pkgs []*packages.Package) string {
+	seen := map[*packages.Package]bool{}
+	var heavy string
+	var walk func(*packages.Package)
+	walk = func(p *packages.Package) {
+		if p == nil || seen[p] || heavy != "" {
+			return
+		}
+		seen[p] = true
+		if isHeavyPath(p.PkgPath) {
+			heavy = p.PkgPath
+			return
+		}
+		for _, imp := range p.Imports {
+			walk(imp)
+		}
+	}
+	for _, p := range pkgs {
+		walk(p)
+	}
+	if heavy != "" {
+		return fmt.Sprintf("import graph includes %s (SSA/RTA is not practical)", heavy)
+	}
+	if len(seen) > MaxRTAPackages {
+		return fmt.Sprintf("import graph has %d packages (limit %d)", len(seen), MaxRTAPackages)
+	}
+	return ""
+}
+
+func isHeavyPath(p string) bool {
+	// These dependency trees are correct RTA targets but routinely take
+	// many minutes to load-all-syntax + SSA + RTA on a laptop.
+	for _, pre := range []string{
+		"github.com/btcsuite/btcd",
+		"github.com/btcsuite/btcutil",
+		"github.com/libp2p/",
+		"github.com/ipfs/",
+		"github.com/multiformats/",
+		"github.com/ethereum/",
+		"github.com/gogo/protobuf",
+		"k8s.io/",
+		"sigs.k8s.io/",
+		"cloud.google.com/",
+		"github.com/aws/aws-sdk-go",
+		"github.com/Azure/",
+		"google.golang.org/api",
+		"go.opentelemetry.io/",
+	} {
+		if p == strings.TrimSuffix(pre, "/") || strings.HasPrefix(p, pre) {
+			return true
+		}
+	}
+	return false
 }
 
 func initialPackages(pkgs []*packages.Package) []*packages.Package {
