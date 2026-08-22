@@ -433,6 +433,201 @@ int main(void) {
 	assertFinding(t, fs, "plugin_unused")
 }
 
+func TestTokenPasteKeepsMacros(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"opts.h": `
+#ifndef OPTS_H
+#define OPTS_H
+#define setopt_nv_CURLOPT_HSTS_CTRL setopt_nv_CURLHSTS
+#define setopt_nv_CURLOPT_HTTPAUTH  setopt_nv_CURLAUTH
+#define UNUSED_PLAIN 1
+#define my_setopt_enum(x, y, z) tool_setopt_enum(x, #y, y, setopt_nv_ ## y, z)
+#endif
+`,
+		"main.c": `
+#include "opts.h"
+int main(void) { my_setopt_enum(0, CURLOPT_HSTS_CTRL, 0); return UNUSED_PLAIN; }
+`,
+	})
+	fs := mustDetect(t, dir)
+	assertNoFinding(t, fs, "setopt_nv_CURLOPT_HSTS_CTRL")
+	assertNoFinding(t, fs, "setopt_nv_CURLOPT_HTTPAUTH")
+	assertNoFinding(t, fs, "UNUSED_PLAIN") // used
+}
+
+func TestPublicHeaderMacrosKeptInLibPlusCLI(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"include/curl/curl.h": `
+#ifndef CURL_H
+#define CURL_H
+#define CURL_STRICTER
+#define CURLE_OBSOLETE CURLE_OBSOLETE50
+void curl_easy_upkeep(void);
+#endif
+`,
+		"lib/easy.c": `
+#include "../include/curl/curl.h"
+void curl_easy_upkeep(void) {}
+static int hidden(void) { return 0; }
+#define LOCAL_UNUSED 1
+`,
+		"lib/CMakeLists.txt": "add_library(libcurl SHARED easy.c)\n",
+		"src/main.c": `
+int main(void) { return 0; }
+`,
+	})
+	fs := mustDetect(t, dir)
+	for _, f := range fs {
+		t.Logf("finding: %s", f)
+	}
+	assertNoFinding(t, fs, "CURL_STRICTER")
+	assertNoFinding(t, fs, "CURLE_OBSOLETE")
+	assertNoFinding(t, fs, "curl_easy_upkeep")
+	assertFinding(t, fs, "hidden")
+	assertFinding(t, fs, "LOCAL_UNUSED")
+	for _, f := range fs {
+		if f.Kind == finding.UnusedFile && strings.Contains(f.Path, "easy.c") {
+			t.Fatalf("lib/*.c should not be unused files: %v", fs)
+		}
+	}
+}
+
+func TestHarnessTestIsEntry(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"tests/libtest/first.h": `
+#ifndef FIRST_H
+#define FIRST_H
+#define easy_init() do { } while(0)
+#define UNUSED_HARNESS 1
+#endif
+`,
+		"tests/libtest/lib1500.c": `
+#include "first.h"
+int test(void) { easy_init(); return 0; }
+static int dead_helper(void) { return 1; }
+`,
+		"src/main.c": `
+int main(void) { return 0; }
+`,
+	})
+	fs := mustDetect(t, dir)
+	for _, f := range fs {
+		t.Logf("finding: %s", f)
+	}
+	assertNoFinding(t, fs, "easy_init")
+	assertFinding(t, fs, "UNUSED_HARNESS")
+	assertFinding(t, fs, "dead_helper")
+	assertNoFinding(t, fs, "test")
+	for _, f := range fs {
+		if f.Kind == finding.UnusedFile && strings.Contains(f.Path, "lib1500") {
+			t.Fatalf("harness test should be an entry: %v", fs)
+		}
+	}
+}
+
+func TestTrueFalseMacroNotReported(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"main.c": `
+#if defined(__hpux)
+#define false 0
+#define true 1
+#endif
+int main(void) { return true && !false; }
+`,
+	})
+	fs := mustDetect(t, dir)
+	assertNoFinding(t, fs, "true")
+	assertNoFinding(t, fs, "false")
+}
+
+func TestAttributeMacroIsUseNotVar(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"main.c": `
+#ifdef __GNUC__
+#define CURL_ALIGN8 __attribute__((aligned(8)))
+#else
+#define CURL_ALIGN8
+#endif
+int flag CURL_ALIGN8 = 1;
+int main(void) { return flag; }
+`,
+	})
+	fs := mustDetect(t, dir)
+	assertNoFinding(t, fs, "CURL_ALIGN8")
+	assertNoFinding(t, fs, "flag")
+}
+
+func TestMacroWrappedFunction(t *testing.T) {
+	src := []byte(`
+static LIBSSH2_ALLOC_FUNC(my_libssh2_malloc)
+{
+    return 0;
+}
+int main(void) { return 0; }
+`)
+	ex := extract(src)
+	names := map[string]bool{}
+	for _, d := range ex.Decls {
+		names[d.Name] = true
+	}
+	if names["LIBSSH2_ALLOC_FUNC"] {
+		t.Fatalf("wrapper macro should not be the function: %+v", ex.Decls)
+	}
+	if !names["my_libssh2_malloc"] {
+		t.Fatalf("expected wrapped function name: %+v", ex.Decls)
+	}
+}
+
+func TestGetProcAddressTEXT(t *testing.T) {
+	src := []byte(`
+int main(void) {
+    void *fn = GetProcAddress(GetModuleHandle(TEXT("ntdll")), TEXT("RtlVerifyVersionInfo"));
+    (void)fn;
+    return 0;
+}
+`)
+	ex := extract(src)
+	found := false
+	for _, s := range ex.DynSyms {
+		if s == "RtlVerifyVersionInfo" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected TEXT() symbol, got %v", ex.DynSyms)
+	}
+	if ex.HasIndirectDlsym {
+		t.Fatal("TEXT(\"...\") should not be treated as indirect")
+	}
+}
+
+func TestConfigHeaderMacrosSkipped(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"lib/config-os400.h": `
+#define HAVE_LDAP_H 1
+#define SIZEOF_INT 4
+`,
+		"lib/util.c": `
+#define LOCAL_UNUSED 2
+int used(void) { return 1; }
+`,
+		"src/main.c": `
+int used(void);
+int main(void) { return used(); }
+`,
+	})
+	fs := mustDetect(t, dir)
+	assertNoFinding(t, fs, "HAVE_LDAP_H")
+	assertNoFinding(t, fs, "SIZEOF_INT")
+	assertFinding(t, fs, "LOCAL_UNUSED")
+}
+
 func TestTestdataApp(t *testing.T) {
 	root := testdata(t, "c", "app")
 	fs := mustDetect(t, root)

@@ -342,19 +342,37 @@ func reservedExport(name string) bool {
 	return false
 }
 
-func looksLikeSharedLibProject(root string) bool {
-	for _, name := range []string{"CMakeLists.txt", "Makefile", "makefile", "meson.build"} {
-		b, err := os.ReadFile(filepath.Join(root, name))
-		if err != nil {
-			continue
-		}
-		s := string(b)
-		if strings.Contains(s, "-shared") ||
-			strings.Contains(s, " SHARED") ||
-			strings.Contains(s, " MODULE") ||
-			strings.Contains(s, "add_library") && strings.Contains(s, "SHARED") {
+func looksLikeSharedLibProject(root string, byAbs map[string]*unit) bool {
+	for _, rel := range []string{
+		"CMakeLists.txt", "Makefile", "makefile", "meson.build",
+		"lib/CMakeLists.txt", "src/CMakeLists.txt",
+		"lib/Makefile.am", "lib/Makefile",
+	} {
+		if cmakeLooksShared(filepath.Join(root, rel)) {
 			return true
 		}
 	}
-	return false
+	hasInc, hasLibC := false, false
+	for _, u := range byAbs {
+		rel := filepath.ToSlash(u.File.Rel)
+		if strings.HasPrefix(rel, "include/") && u.IsHeader {
+			hasInc = true
+		}
+		if strings.HasPrefix(rel, "lib/") && !u.IsHeader {
+			hasLibC = true
+		}
+	}
+	return hasInc && hasLibC
+}
+
+func cmakeLooksShared(path string) bool {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	s := string(b)
+	return strings.Contains(s, "-shared") ||
+		strings.Contains(s, " SHARED") ||
+		strings.Contains(s, " MODULE") ||
+		(strings.Contains(s, "add_library") && strings.Contains(s, "SHARED"))
 }

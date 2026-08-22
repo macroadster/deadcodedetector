@@ -16,11 +16,17 @@ type Extracted struct {
 	// HasIndirectDlsym is true when dlsym/GetProcAddress is called with a non-literal.
 	HasIndirectDlsym bool
 	HasMain          bool
-	IgnoreAll        bool
+	// HasTest is true when the file defines a harness entry named test().
+	HasTest   bool
+	IgnoreAll bool
 	// HeaderGuard is the include-guard macro, if any.
 	HeaderGuard string
 	// IsHeader is set by the caller from the file extension.
 	IsHeader bool
+	// PastePrefixes are left-hand sides of ## in this file (setopt_nv_ ## y).
+	PastePrefixes []string
+	// PasteSuffixes are right-hand sides of ## (x ## _t).
+	PasteSuffixes []string
 }
 
 // Include is a #include directive.
@@ -335,12 +341,17 @@ func (p *parser) parseIfCond(ex *Extracted) {
 
 func (p *parser) skipToNewline(ex *Extracted, recordUses bool) {
 	steps := 0
+	prevIdent := ""
 	for p.peek().kind != tEOF && p.peek().kind != tNewline {
 		steps++
 		if steps > 10000 {
 			return
 		}
 		t := p.peek()
+		p.notePaste(ex, t, prevIdent)
+		if t.kind == tIdent {
+			prevIdent = t.lit
+		}
 		if recordUses && ex != nil {
 			if t.kind == tIdent && t.lit != "defined" {
 				p.recordUse(ex, t)
@@ -352,6 +363,19 @@ func (p *parser) skipToNewline(ex *Extracted, recordUses bool) {
 	}
 	if p.peek().kind == tNewline {
 		p.next()
+	}
+}
+
+func (p *parser) notePaste(ex *Extracted, t token, prevIdent string) {
+	if ex == nil || t.kind != tPunct || t.lit != "##" {
+		return
+	}
+	if prevIdent != "" {
+		ex.PastePrefixes = append(ex.PastePrefixes, prevIdent)
+	}
+	n := p.peekN(1)
+	if n.kind == tIdent {
+		ex.PasteSuffixes = append(ex.PasteSuffixes, n.lit)
 	}
 }
 
@@ -372,6 +396,10 @@ func (p *parser) parseFileScope(ex *Extracted) {
 	}
 
 	sp := p.parseSpecifiers(ex)
+	if p.looksLikeMacroWrapperFunc() {
+		p.parseMacroWrapperFunc(ex, sp)
+		return
+	}
 	if p.peek().kind == tPunct && (p.peek().lit == ";" || p.peek().lit == "{") {
 		// struct/enum tag only, or stray brace.
 		if p.peek().lit == "{" {
@@ -390,6 +418,17 @@ func (p *parser) parseFileScope(ex *Extracted) {
 			return
 		}
 		p.skipNewlines()
+		// type name ATTR_MACRO = ...  (curl CURL_ALIGN8 / PACK)
+		if !d.function {
+			for p.peek().kind == tIdent {
+				n := p.peekN(1)
+				if n.kind != tPunct || (n.lit != "=" && n.lit != ";" && n.lit != ",") {
+					break
+				}
+				p.recordUse(ex, p.peek())
+				p.next()
+			}
+		}
 		if d.function && p.peek().kind == tPunct && p.peek().lit == ";" {
 			// Prototype: keep the name so #include use-checks can see it,
 			// but do not report the declaration as unused code.
@@ -422,6 +461,10 @@ func (p *parser) parseFileScope(ex *Extracted) {
 				ex.HasMain = true
 				decl.Keep = true
 			}
+			if isTestEntry(d.name) {
+				ex.HasTest = true
+				decl.Keep = true
+			}
 			ex.Decls = append(ex.Decls, decl)
 			p.skipBalanced("{", "}", ex)
 			return
@@ -448,6 +491,9 @@ func (p *parser) parseFileScope(ex *Extracted) {
 				})
 				if isEntryFunc(d.name) {
 					ex.HasMain = true
+				}
+				if isTestEntry(d.name) {
+					ex.HasTest = true
 				}
 				p.skipBalanced("{", "}", ex)
 				return
@@ -583,6 +629,13 @@ func (p *parser) looksLikeTypeThenName() bool {
 	// Not a type:  foo(  is a function named foo.
 	n := p.peekN(1)
 	if n.kind == tIdent {
+		// int flag CURL_ALIGN8 = 1;  — ALL_CAPS after the name is an
+		// attribute macro, not a typedef-name.
+		n2 := p.peekN(2)
+		if isAttrMacroName(n.lit) && n2.kind == tPunct &&
+			(n2.lit == "=" || n2.lit == ";" || n2.lit == ",") {
+			return false
+		}
 		return true
 	}
 	if n.kind != tPunct {
@@ -801,6 +854,7 @@ func (p *parser) skipBalanced(open, close string, ex *Extracted) {
 	depth := 1
 	steps := 0
 	limit := len(p.toks)*2 + 8
+	prevIdent := ""
 	for p.peek().kind != tEOF && depth > 0 {
 		steps++
 		if steps > limit {
@@ -820,7 +874,9 @@ func (p *parser) skipBalanced(open, close string, ex *Extracted) {
 			}
 		}
 		if ex != nil {
+			p.notePaste(ex, t, prevIdent)
 			if t.kind == tIdent {
+				prevIdent = t.lit
 				p.recordUse(ex, t)
 			} else if t.kind == tString {
 				ex.Strings = append(ex.Strings, t.lit)
@@ -897,7 +953,9 @@ func (p *parser) recordDynCall(ex *Extracted, isSym bool) {
 		if isSym {
 			want = 1
 		}
-		if depth == 1 && arg == want && t.kind == tString {
+		// TEXT("name") / MAKEINTRESOURCE wraps the literal; accept any
+		// string in the target argument, including nested calls.
+		if arg == want && depth >= 1 && t.kind == tString {
 			sawLiteral = true
 			if isSym {
 				if isIdentString(t.lit) {
@@ -920,6 +978,61 @@ func isEntryFunc(name string) bool {
 		return true
 	}
 	return false
+}
+
+func isTestEntry(name string) bool {
+	return name == "test"
+}
+
+func (p *parser) looksLikeMacroWrapperFunc() bool {
+	// static LIBSSH2_ALLOC_FUNC(my_libssh2_malloc) { ... }
+	if p.peek().kind != tIdent || isKeyword(p.peek().lit) || isTypeKeyword(p.peek().lit) {
+		return false
+	}
+	if p.peekN(1).kind != tPunct || p.peekN(1).lit != "(" {
+		return false
+	}
+	if p.peekN(2).kind != tIdent || isTypeKeyword(p.peekN(2).lit) || isKeyword(p.peekN(2).lit) {
+		return false
+	}
+	if p.peekN(3).kind != tPunct || p.peekN(3).lit != ")" {
+		return false
+	}
+	j := 4
+	for p.peekN(j).kind == tNewline && j < 12 {
+		j++
+	}
+	return p.peekN(j).kind == tPunct && p.peekN(j).lit == "{"
+}
+
+func (p *parser) parseMacroWrapperFunc(ex *Extracted, sp specs) {
+	mac := p.next()
+	p.recordUse(ex, mac)
+	p.next() // (
+	nameTok := p.next()
+	p.acceptPunct(")")
+	p.skipNewlines()
+	decl := Decl{
+		Name:     nameTok.lit,
+		Kind:     "function",
+		Static:   sp.static,
+		Extern:   sp.extern,
+		Exported: sp.exported && !sp.static,
+		Keep:     sp.keep || isEntryFunc(nameTok.lit) || isTestEntry(nameTok.lit),
+		Line:     nameTok.line,
+		Col:      nameTok.col,
+		Ignored:  sp.ignored || lineHasIgnore(p.src, nameTok.line),
+	}
+	if isEntryFunc(nameTok.lit) {
+		ex.HasMain = true
+	}
+	if isTestEntry(nameTok.lit) {
+		ex.HasTest = true
+	}
+	ex.Decls = append(ex.Decls, decl)
+	if p.peek().kind == tPunct && p.peek().lit == "{" {
+		p.skipBalanced("{", "}", ex)
+	}
 }
 
 func isQualifier(s string) bool {
@@ -949,12 +1062,39 @@ func isKeyword(s string) bool {
 		"short", "signed", "sizeof", "static", "struct", "switch", "typedef",
 		"union", "unsigned", "void", "volatile", "while", "_Alignas",
 		"_Alignof", "_Atomic", "_Bool", "_Complex", "_Generic", "_Imaginary",
-		"_Noreturn", "_Static_assert", "_Thread_local", "bool", "true",
-		"false", "alignof", "alignas", "static_assert", "thread_local",
+		"_Noreturn", "_Static_assert", "_Thread_local", "bool",
+		"alignof", "alignas", "static_assert", "thread_local",
 		"typeof", "typeof_unqual", "nullptr",
 		"__attribute__", "__attribute", "__declspec", "__asm__", "__asm",
 		"asm", "__typeof__", "__typeof", "__inline", "__inline__",
 		"__restrict", "__restrict__", "__extension__":
+		return true
+	}
+	return false
+}
+
+func isAttrMacroName(s string) bool {
+	if len(s) < 2 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '_' || (c >= '0' && c <= '9') {
+			continue
+		}
+		if c < 'A' || c > 'Z' {
+			return false
+		}
+	}
+	return true
+}
+
+func isReservedMacro(name string) bool {
+	switch name {
+	case "true", "false", "bool", "NULL", "inline", "restrict",
+		"__cplusplus", "__STDC__", "__STDC_VERSION__",
+		"errno", "stdin", "stdout", "stderr",
+		"EOF", "BUFSIZ":
 		return true
 	}
 	return false
