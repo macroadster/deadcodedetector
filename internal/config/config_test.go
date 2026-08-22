@@ -18,6 +18,10 @@ func TestParseLangs(t *testing.T) {
 	if err != nil || len(got) != 1 || got[0] != "java" {
 		t.Fatalf("java: %v %v", got, err)
 	}
+	got, err = ParseLangs("c")
+	if err != nil || len(got) != 1 || got[0] != "c" {
+		t.Fatalf("c: %v %v", got, err)
+	}
 	if _, err := ParseLangs("ruby"); err == nil {
 		t.Fatal("expected error")
 	}

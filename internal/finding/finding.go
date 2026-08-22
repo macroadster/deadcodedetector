@@ -15,6 +15,7 @@ const (
 	CSS        Language = "css"
 	Python     Language = "python"
 	Java       Language = "java"
+	C          Language = "c"
 )
 
 // Kind classifies a dead-code finding.
@@ -32,6 +33,7 @@ const (
 	UnusedFile          Kind = "unused_file"
 	UnusedSelector      Kind = "unused_selector"
 	UnusedKeyframes     Kind = "unused_keyframes"
+	UnusedMacro         Kind = "unused_macro"
 )
 
 // Finding is one dead-code report.

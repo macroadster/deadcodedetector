@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	cdet "github.com/eric/deadcodedetector/internal/c"
 	"github.com/eric/deadcodedetector/internal/config"
 	cssdet "github.com/eric/deadcodedetector/internal/css"
 	"github.com/eric/deadcodedetector/internal/finding"
@@ -87,6 +88,13 @@ func Run(cfg config.Config) ([]finding.Finding, error) {
 			return nil, fmt.Errorf("java: %w", err)
 		}
 		fs = append(fs, jfs...)
+	}
+	if cfg.Wants("c", detected) {
+		cfs, err := cdet.Detect(abs, files, cfg.Entries)
+		if err != nil {
+			return nil, fmt.Errorf("c: %w", err)
+		}
+		fs = append(fs, cfs...)
 	}
 	finding.Sort(fs)
 	return fs, nil

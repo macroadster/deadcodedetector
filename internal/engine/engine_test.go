@@ -46,6 +46,23 @@ func TestRunJava(t *testing.T) {
 	}
 }
 
+func TestRunC(t *testing.T) {
+	root := testdata(t, "c", "app")
+	fs, err := Run(config.Config{Root: root, Tests: true, Format: "text"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	for _, f := range fs {
+		if f.Language == finding.C {
+			n++
+		}
+	}
+	if n == 0 {
+		t.Fatalf("expected C findings, got %v", fs)
+	}
+}
+
 func TestRunPython(t *testing.T) {
 	root := testdata(t, "py", "app")
 	fs, err := Run(config.Config{Root: root, Tests: true, Format: "text"})

@@ -20,7 +20,7 @@ const MaxSourceBytes = 2 << 20 // 2 MiB
 type File struct {
 	Abs  string
 	Rel  string // slash-separated, relative to root
-	Lang string // "go", "js", "css", "html", "py", "java", "xml", "props"
+	Lang string // "go", "js", "css", "html", "py", "java", "c", "dylib", "xml", "props"
 }
 
 // Discover walks root and returns files that look like source, applying m.
@@ -79,12 +79,16 @@ func Discover(root string, m *ignore.Matcher) ([]File, error) {
 		if m != nil && m.Ignore(rel, false) {
 			return nil
 		}
-		if info, err := d.Info(); err == nil && info.Size() > MaxSourceBytes {
-			return nil
-		}
 		lang := langOf(d.Name())
 		if lang == "" {
 			return nil
+		}
+		// Shared libraries are only opened for their export table, so the
+		// source-size cap does not apply.
+		if lang != "dylib" {
+			if info, err := d.Info(); err == nil && info.Size() > MaxSourceBytes {
+				return nil
+			}
 		}
 		out = append(out, File{Abs: path, Rel: rel, Lang: lang})
 		return nil
@@ -126,6 +130,9 @@ func langOf(name string) string {
 	if strings.HasSuffix(low, ".d.ts") || strings.HasSuffix(low, ".d.mts") || strings.HasSuffix(low, ".d.cts") {
 		return ""
 	}
+	if isVersionedSharedObject(low) {
+		return "dylib"
+	}
 	ext := strings.ToLower(filepath.Ext(low))
 	switch ext {
 	case ".go":
@@ -142,6 +149,10 @@ func langOf(name string) string {
 		return "py"
 	case ".java":
 		return "java"
+	case ".c", ".h":
+		return "c"
+	case ".so", ".dylib", ".dll":
+		return "dylib"
 	case ".xml":
 		return "xml"
 	case ".properties":
@@ -151,12 +162,30 @@ func langOf(name string) string {
 	}
 }
 
+// libfoo.so.1 / libfoo.so.1.2.3 are ELF SONAME files, not a ".1" source ext.
+func isVersionedSharedObject(low string) bool {
+	i := strings.Index(low, ".so.")
+	if i < 0 {
+		return false
+	}
+	ver := low[i+4:]
+	if ver == "" {
+		return false
+	}
+	for _, r := range ver {
+		if r != '.' && (r < '0' || r > '9') {
+			return false
+		}
+	}
+	return true
+}
+
 // DetectedLangs returns the set of analyzable languages present in files.
 func DetectedLangs(files []File) map[string]bool {
 	out := map[string]bool{}
 	for _, f := range files {
 		switch f.Lang {
-		case "go", "js", "css", "py", "java":
+		case "go", "js", "css", "py", "java", "c":
 			out[f.Lang] = true
 		}
 	}

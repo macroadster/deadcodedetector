@@ -1,4 +1,4 @@
-// Command dcd reports dead code in Go, JavaScript/TypeScript, CSS, Python, and Java.
+// Command dcd reports dead code in Go, JavaScript/TypeScript, CSS, Python, Java, and C.
 package main
 
 import (
@@ -12,7 +12,7 @@ import (
 	"github.com/eric/deadcodedetector/internal/report"
 )
 
-const usage = `dcd — dead code detector for Go, JavaScript/TypeScript, CSS, Python, and Java
+const usage = `dcd — dead code detector for Go, JavaScript/TypeScript, CSS, Python, Java, and C
 
 Usage:
   dcd [flags] [path]
@@ -35,7 +35,7 @@ func run(args []string) int {
 		fs.PrintDefaults()
 	}
 
-	lang := fs.String("lang", "", "comma-separated languages: go,js,css,py,java (default: auto-detect)")
+	lang := fs.String("lang", "", "comma-separated languages: go,js,css,py,java,c (default: auto-detect)")
 	format := fs.String("format", "text", "output format: text, json, sarif")
 	tests := fs.Bool("tests", true, "treat Go tests as entry points")
 	exported := fs.String("exported", "auto", "report unused exported Go symbols: auto, true, false")
@@ -43,7 +43,7 @@ func run(args []string) int {
 	timeout := fs.Duration("timeout", 0, "max time for Go reachability (0 = 45s; negative = no limit)")
 	fail := fs.Bool("fail-on-findings", false, "exit 1 if any dead code is found")
 	var entries, ignores multiFlag
-	fs.Var(&entries, "entry", "JavaScript/Python/Java entry file (repeatable)")
+	fs.Var(&entries, "entry", "JavaScript/Python/Java/C entry file (repeatable)")
 	fs.Var(&ignores, "ignore", "gitignore-style pattern to skip (repeatable)")
 
 	if err := fs.Parse(args); err != nil {
