@@ -628,6 +628,89 @@ int main(void) { return used(); }
 	assertFinding(t, fs, "LOCAL_UNUSED")
 }
 
+func TestPublicAPICalleesStayLive(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"include/foo.h": `
+#ifndef FOO_H
+#define FOO_H
+int foo_init(void);
+#endif
+`,
+		"lib/foo.c": `
+#include "../include/foo.h"
+static int helper(int n) {
+    if (n) return n;
+    return 1;
+}
+int foo_init(void) { return helper(0); }
+`,
+		"lib/CMakeLists.txt": "add_library(foo SHARED foo.c)\n",
+		"src/main.c": `
+int main(void) { return 0; }
+`,
+	})
+	fs := mustDetect(t, dir)
+	assertNoFinding(t, fs, "foo_init")
+	assertNoFinding(t, fs, "helper")
+}
+
+func TestDetectOnlyUsedFromDeadCode(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"main.c": `
+int used(void) { return 1; }
+int main(void) { return used(); }
+
+static int dead_rec(int n) {
+    if (n <= 0) return 0;
+    return dead_rec(n - 1);
+}
+
+static int dead_leaf(int n) {
+    if (n) return n;
+    return -1;
+}
+static int (*dead_fp)(int) = dead_leaf;
+
+static int dead_child(int n) { return n ? n : 1; }
+static int dead_parent(int n) {
+    if (n > 0) return dead_child(n);
+    return 0;
+}
+`,
+	})
+	fs := mustDetect(t, dir)
+	assertFinding(t, fs, "dead_rec")
+	assertFinding(t, fs, "dead_leaf")
+	assertFinding(t, fs, "dead_fp")
+	assertFinding(t, fs, "dead_parent")
+	assertFinding(t, fs, "dead_child")
+	assertNoFinding(t, fs, "used")
+	assertNoFinding(t, fs, "main")
+}
+
+func TestExtractUseOwner(t *testing.T) {
+	src := []byte(`
+static int leaf(int n) { return n ? n : 0; }
+static int (*fp)(int) = leaf;
+int main(void) { return fp(1); }
+`)
+	ex := extract(src)
+	var sawLeafFromFP, sawFPFromMain bool
+	for _, u := range ex.Uses {
+		if u.Name == "leaf" && u.Owner == "fp" {
+			sawLeafFromFP = true
+		}
+		if u.Name == "fp" && u.Owner == "main" {
+			sawFPFromMain = true
+		}
+	}
+	if !sawLeafFromFP || !sawFPFromMain {
+		t.Fatalf("owners not attached: %+v", ex.Uses)
+	}
+}
+
 func TestTestdataApp(t *testing.T) {
 	root := testdata(t, "c", "app")
 	fs := mustDetect(t, root)
@@ -638,13 +721,13 @@ func TestTestdataApp(t *testing.T) {
 	assertFinding(t, fs, "unused_static")
 	assertFinding(t, fs, "plugin_unused")
 	assertFinding(t, fs, "unused_classify")
+	assertFinding(t, fs, "unused_rank")
 	assertFinding(t, fs, "unused_cb")
+	assertFinding(t, fs, "unused_scale")
 	assertNoFinding(t, fs, "USED_MACRO")
 	assertNoFinding(t, fs, "used_fn")
 	assertNoFinding(t, fs, "plugin_init")
 	assertNoFinding(t, fs, "main")
-	// Only referenced from the unused function pointer unused_cb.
-	assertNoFinding(t, fs, "unused_scale")
 }
 
 func testdata(t *testing.T, elems ...string) string {

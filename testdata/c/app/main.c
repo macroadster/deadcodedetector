@@ -9,16 +9,13 @@ int main(void) {
     return used_fn();
 }
 
-/* Never called. Looks live: branches and calls used_fn / USED_MACRO. */
+/* Never called from outside; the recursive call is not an external use. */
 static int unused_static(int n) {
     if (n <= 0) {
         return used_fn();
     }
-    while (n > 0) {
-        if (n == USED_MACRO) {
-            return n;
-        }
-        n--;
+    if (n == USED_MACRO) {
+        return n;
     }
-    return 0;
+    return unused_static(n - 1);
 }

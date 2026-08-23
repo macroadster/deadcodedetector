@@ -63,6 +63,10 @@ type Decl struct {
 type Use struct {
 	Name      string
 	Line, Col int
+	// Owner is the file-scope function or object whose body or initializer
+	// contains this reference. Empty means a file-scope / preprocessor use,
+	// which always counts as live (prefer false negatives).
+	Owner string
 }
 
 func extract(src []byte) Extracted {
@@ -77,9 +81,17 @@ func extract(src []byte) Extracted {
 }
 
 type parser struct {
-	toks []token
-	i    int
-	src  []byte
+	toks  []token
+	i     int
+	src   []byte
+	owner string
+}
+
+func (p *parser) withOwner(name string, fn func()) {
+	prev := p.owner
+	p.owner = name
+	fn()
+	p.owner = prev
 }
 
 func (p *parser) peek() token {
@@ -466,7 +478,7 @@ func (p *parser) parseFileScope(ex *Extracted) {
 				decl.Keep = true
 			}
 			ex.Decls = append(ex.Decls, decl)
-			p.skipBalanced("{", "}", ex)
+			p.withOwner(d.name, func() { p.skipBalanced("{", "}", ex) })
 			return
 		}
 		// K&R parameter declarations then body.
@@ -495,7 +507,7 @@ func (p *parser) parseFileScope(ex *Extracted) {
 				if isTestEntry(d.name) {
 					ex.HasTest = true
 				}
-				p.skipBalanced("{", "}", ex)
+				p.withOwner(d.name, func() { p.skipBalanced("{", "}", ex) })
 				return
 			}
 		}
@@ -528,7 +540,7 @@ func (p *parser) parseFileScope(ex *Extracted) {
 		}
 		if p.peek().kind == tPunct && p.peek().lit == "=" {
 			p.next()
-			p.skipInitializer(ex)
+			p.withOwner(d.name, func() { p.skipInitializer(ex) })
 		}
 		if p.acceptPunct(",") {
 			continue
@@ -906,7 +918,7 @@ func (p *parser) recordUse(ex *Extracted, t token) {
 	if isKeyword(t.lit) || isQualifier(t.lit) {
 		return
 	}
-	ex.Uses = append(ex.Uses, Use{Name: t.lit, Line: t.line, Col: t.col})
+	ex.Uses = append(ex.Uses, Use{Name: t.lit, Line: t.line, Col: t.col, Owner: p.owner})
 	// dlsym / GetProcAddress / dlopen argument capture.
 	switch t.lit {
 	case "dlsym", "GetProcAddress", "GetProcAddressA", "GetProcAddressW":
@@ -1031,7 +1043,7 @@ func (p *parser) parseMacroWrapperFunc(ex *Extracted, sp specs) {
 	}
 	ex.Decls = append(ex.Decls, decl)
 	if p.peek().kind == tPunct && p.peek().lit == "{" {
-		p.skipBalanced("{", "}", ex)
+		p.withOwner(nameTok.lit, func() { p.skipBalanced("{", "}", ex) })
 	}
 }
 

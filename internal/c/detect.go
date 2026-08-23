@@ -110,6 +110,26 @@ func Detect(root string, files []walk.File, entries []string) ([]finding.Finding
 			}
 		}
 	}
+	// Seed for decl reachability: string literals and dynsyms only.
+	// Identifier uses are added per-round after dropping unused owners.
+	declSeed := identStringUses(byAbs)
+	for _, s := range dynSyms {
+		declSeed[s]++
+	}
+	if indirect {
+		for _, u := range byAbs {
+			for _, d := range u.Decls {
+				if !d.Static && d.Kind == "function" {
+					declSeed[d.Name]++
+				}
+			}
+		}
+		for _, lib := range dylibs {
+			for _, s := range lib.Exports {
+				declSeed[s]++
+			}
+		}
+	}
 
 	var fs []finding.Finding
 	if len(entrySet) > 0 {
@@ -145,8 +165,8 @@ func Detect(root string, files []walk.File, entries []string) ([]finding.Finding
 		}
 		fs = append(fs, unusedIncludes(u, byAbs)...)
 		fs = append(fs, unusedMacros(u, byAbs, pastePre, pasteSuf)...)
-		fs = append(fs, unusedDecls(u, globalUses, reportExports, libProject, publicAPI)...)
 	}
+	fs = append(fs, unusedDeclFindings(byAbs, liveFiles, entrySet, declSeed, reportExports, libProject, publicAPI)...)
 
 	fs = append(fs, unusedDylibExports(dylibs, byAbs, globalUses, dynSyms, dynLibs, indirect)...)
 	return fs, nil
@@ -342,13 +362,20 @@ func collectDynamic(byAbs map[string]*unit) (syms []string, libs []string, indir
 }
 
 func projectUses(byAbs map[string]*unit) map[string]int {
-	out := map[string]int{}
+	out := identStringUses(byAbs)
 	for _, u := range byAbs {
 		for _, use := range u.Uses {
 			if use.Name != "" {
 				out[use.Name]++
 			}
 		}
+	}
+	return out
+}
+
+func identStringUses(byAbs map[string]*unit) map[string]int {
+	out := map[string]int{}
+	for _, u := range byAbs {
 		for _, s := range u.Strings {
 			if isIdentString(s) {
 				out[s]++
@@ -488,8 +515,84 @@ func unusedMacros(u *unit, byAbs map[string]*unit, pastePre, pasteSuf []string) 
 	return fs
 }
 
-func unusedDecls(u *unit, global map[string]int, reportExports, libProject bool, publicAPI map[string]bool) []finding.Finding {
-	local := localUseCount(u)
+// unusedDeclFindings reports unused functions and objects, then drops uses
+// that only occur inside those decls and repeats. A symbol referenced solely
+// from unused code (or only from itself) is itself unused.
+func unusedDeclFindings(byAbs map[string]*unit, liveFiles, entrySet map[string]bool, seed map[string]int, reportExports, libProject bool, publicAPI map[string]bool) []finding.Finding {
+	var units []*unit
+	for abs, u := range byAbs {
+		if u.IgnoreAll {
+			continue
+		}
+		if liveFiles[abs] || len(entrySet) == 0 {
+			units = append(units, u)
+		}
+	}
+	dead := map[string]bool{}
+	var fs []finding.Finding
+	limit := 1
+	for _, u := range units {
+		limit += len(u.Decls)
+	}
+	for i := 0; i < limit; i++ {
+		global, local := liveUseMaps(byAbs, seed, dead)
+		var round []finding.Finding
+		added := false
+		for _, u := range units {
+			for _, f := range unusedDecls(u, local[u.File.Abs], global, reportExports, libProject, publicAPI) {
+				key := u.File.Abs + "\x00" + f.Name
+				if !dead[key] {
+					dead[key] = true
+					added = true
+				}
+				round = append(round, f)
+			}
+		}
+		fs = round
+		if !added {
+			break
+		}
+	}
+	return fs
+}
+
+func liveUseMaps(byAbs map[string]*unit, seed map[string]int, dead map[string]bool) (global map[string]int, local map[string]map[string]int) {
+	global = map[string]int{}
+	for k, v := range seed {
+		if k != "" {
+			global[k] = v
+		}
+	}
+	local = map[string]map[string]int{}
+	for abs, u := range byAbs {
+		loc := map[string]int{}
+		for _, use := range u.Uses {
+			if use.Name == "" || ownedUseDead(use, abs, dead) {
+				continue
+			}
+			global[use.Name]++
+			loc[use.Name]++
+		}
+		local[abs] = loc
+	}
+	return global, local
+}
+
+func ownedUseDead(use Use, abs string, dead map[string]bool) bool {
+	if use.Owner == "" {
+		return false
+	}
+	// A decl mentioning its own name is not an external use.
+	if use.Owner == use.Name {
+		return true
+	}
+	return dead[abs+"\x00"+use.Owner]
+}
+
+func unusedDecls(u *unit, local, global map[string]int, reportExports, libProject bool, publicAPI map[string]bool) []finding.Finding {
+	if local == nil {
+		local = map[string]int{}
+	}
 	var fs []finding.Finding
 	seen := map[string]bool{}
 	for _, d := range u.Decls {
