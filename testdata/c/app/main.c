@@ -9,6 +9,16 @@ int main(void) {
     return used_fn();
 }
 
-static int unused_static(void) {
+/* Never called. Looks live: branches and calls used_fn / USED_MACRO. */
+static int unused_static(int n) {
+    if (n <= 0) {
+        return used_fn();
+    }
+    while (n > 0) {
+        if (n == USED_MACRO) {
+            return n;
+        }
+        n--;
+    }
     return 0;
 }

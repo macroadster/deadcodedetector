@@ -637,10 +637,14 @@ func TestTestdataApp(t *testing.T) {
 	assertFinding(t, fs, "UNUSED_MACRO")
 	assertFinding(t, fs, "unused_static")
 	assertFinding(t, fs, "plugin_unused")
+	assertFinding(t, fs, "unused_classify")
+	assertFinding(t, fs, "unused_cb")
 	assertNoFinding(t, fs, "USED_MACRO")
 	assertNoFinding(t, fs, "used_fn")
 	assertNoFinding(t, fs, "plugin_init")
 	assertNoFinding(t, fs, "main")
+	// Only referenced from the unused function pointer unused_cb.
+	assertNoFinding(t, fs, "unused_scale")
 }
 
 func testdata(t *testing.T, elems ...string) string {
